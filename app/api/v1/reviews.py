@@ -40,6 +40,11 @@ async def retry_review(job_id: uuid.UUID, db: DB, _: ReviewerUser):
     return await svc.retry_job(db, job_id)
 
 
+@router.post("/{job_id}/requeue", response_model=ReviewJobRead, status_code=202)
+async def requeue_review(job_id: uuid.UUID, db: DB, _: ReviewerUser):
+    return await svc.requeue_pending_job(db, job_id)
+
+
 @router.post("/{job_id}/restart", response_model=ReviewJobRead, status_code=202)
 async def restart_review(job_id: uuid.UUID, db: DB, _: ReviewerUser):
     return await svc.restart_job(db, job_id)

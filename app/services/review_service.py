@@ -1,4 +1,5 @@
 import uuid
+from datetime import UTC, datetime, timedelta
 
 from fastapi import HTTPException, status
 from sqlalchemy import select
@@ -13,6 +14,8 @@ from app.schemas.review import ReviewTriggerRequest
 from app.services.git_server_service import get_decrypted_access_token
 from app.services.gitlab_service import GitLabClient
 from app.workers.tasks import run_review_job
+
+ORPHAN_PENDING_REQUEUE_MIN_AGE = timedelta(seconds=30)
 
 
 async def list_jobs(db: AsyncSession, limit: int = 50) -> list[ReviewJob]:
@@ -49,9 +52,7 @@ async def trigger_review(
     await db.commit()
     await db.refresh(job)
 
-    # Dispatch to Celery
-    run_review_job.delay(str(job.id))
-    return job
+    return await _enqueue_job(db, job)
 
 
 async def retry_job(db: AsyncSession, job_id: uuid.UUID) -> ReviewJob:
@@ -67,8 +68,7 @@ async def retry_job(db: AsyncSession, job_id: uuid.UUID) -> ReviewJob:
     job.completed_at = None
     await db.commit()
 
-    run_review_job.delay(str(job.id))
-    return job
+    return await _enqueue_job(db, job)
 
 
 async def restart_job(db: AsyncSession, job_id: uuid.UUID) -> ReviewJob:
@@ -88,8 +88,7 @@ async def restart_job(db: AsyncSession, job_id: uuid.UUID) -> ReviewJob:
     await db.commit()
     await db.refresh(job)
 
-    run_review_job.delay(str(job.id))
-    return job
+    return await _enqueue_job(db, job)
 
 
 async def delete_job(db: AsyncSession, job_id: uuid.UUID) -> None:
@@ -119,8 +118,33 @@ async def create_webhook_job(
     await db.commit()
     await db.refresh(job)
 
-    run_review_job.delay(str(job.id))
-    return job
+    return await _enqueue_job(db, job)
+
+
+async def requeue_pending_job(db: AsyncSession, job_id: uuid.UUID) -> ReviewJob:
+    job = await get_job(db, job_id)
+    if job.status != "pending":
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Cannot requeue a job with status '{job.status}'",
+        )
+    if job.started_at is not None:
+        raise ConflictError(
+            "Cannot requeue a pending job that already started. Wait for it to finish."
+        )
+
+    age = datetime.now(UTC) - job.created_at
+    if age < ORPHAN_PENDING_REQUEUE_MIN_AGE:
+        raise ConflictError(
+            "Only pending jobs older than 30 seconds can be requeued. "
+            "This avoids creating duplicate tasks while Celery is still picking the job up."
+        )
+
+    job.error_message = None
+    job.completed_at = None
+    await db.commit()
+    await db.refresh(job)
+    return await _enqueue_job(db, job)
 
 
 async def _get_job_for_mutation(db: AsyncSession, job_id: uuid.UUID) -> ReviewJob:
@@ -143,6 +167,23 @@ def _ensure_job_is_stopped(job: ReviewJob, *, action: str) -> None:
         raise ConflictError(
             f"Cannot {action} a job with status '{job.status}'. Wait until it finishes."
         )
+
+
+async def _enqueue_job(db: AsyncSession, job: ReviewJob) -> ReviewJob:
+    try:
+        run_review_job.apply_async(args=(str(job.id),), queue="reviews")
+    except Exception as exc:
+        job.status = "failed"
+        job.error_message = f"Failed to enqueue review job: {exc}"[:2000]
+        job.completed_at = datetime.now(UTC)
+        await db.commit()
+        await db.refresh(job)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Failed to enqueue review job. Check Redis/Celery connectivity and retry.",
+        ) from exc
+
+    return job
 
 
 async def _delete_gitlab_comments_for_job(job: ReviewJob) -> None:

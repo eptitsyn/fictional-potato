@@ -25,3 +25,31 @@ def test_run_review_job_reuses_same_event_loop(monkeypatch):
     assert second_result == {"status": "completed"}
     assert len(loop_ids) == 2
     assert loop_ids[0] == loop_ids[1]
+
+
+def test_normalize_comment_lines_preserves_normalized_line_range():
+    line_number, line_end = tasks._normalize_comment_lines(
+        {
+            "file_path": "app/example.py",
+            "line_number": 12,
+            "line_end": 15,
+            "comment_body": "Validate the bounds before slicing.",
+        }
+    )
+
+    assert line_number == 12
+    assert line_end == 15
+
+
+def test_normalize_comment_lines_reorders_normalized_line_range():
+    line_number, line_end = tasks._normalize_comment_lines(
+        {
+            "file_path": "app/example.py",
+            "line_number": 20,
+            "line_end": 18,
+            "comment_body": "The reported range should be ordered.",
+        }
+    )
+
+    assert line_number == 18
+    assert line_end == 20

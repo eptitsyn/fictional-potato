@@ -1391,6 +1391,10 @@ function canRestartReview(job) {
   return job && (job.status === 'completed' || job.status === 'failed');
 }
 
+function canRequeueReview(job) {
+  return job && job.status === 'pending';
+}
+
 function canDeleteReview(job) {
   return job && job.status !== 'pending' && job.status !== 'running';
 }
@@ -1409,6 +1413,7 @@ async function loadReviews() {
       <td>${fmtDate(j.created_at)}</td>
       <td>
         <button class="btn btn-sm btn-secondary" onclick="viewReview('${j.id}')">View</button>
+        ${canRequeueReview(j) ? `<button class="btn btn-sm btn-secondary" onclick="requeueReview('${j.id}')">Requeue</button>` : ''}
         ${canRestartReview(j) ? `<button class="btn btn-sm btn-secondary" onclick="restartReview('${j.id}')">Restart</button>` : ''}
         ${canDeleteReview(j) ? `<button class="btn btn-sm btn-danger" onclick="deleteReview('${j.id}')">Delete</button>` : ''}
       </td>
@@ -1448,6 +1453,7 @@ async function viewReview(id) {
     `).join('')}
   `;
   document.getElementById('review-detail-actions').innerHTML = `
+    ${canRequeueReview(job) ? `<button class="btn btn-secondary" onclick="requeueReview('${job.id}')">Requeue</button>` : ''}
     ${canRestartReview(job) ? `<button class="btn btn-secondary" onclick="restartReview('${job.id}')">Restart</button>` : ''}
     ${canDeleteReview(job) ? `<button class="btn btn-danger" onclick="deleteReview('${job.id}')">Delete</button>` : ''}
     <button class="btn btn-secondary" onclick="closeModal('modal-review-detail')">Close</button>
@@ -1455,9 +1461,11 @@ async function viewReview(id) {
   document.getElementById('modal-review-detail').classList.remove('hidden');
 }
 
-async function retryReview(id) {
-  await api('POST', `/reviews/${id}/retry`);
-  loadReviews();
+async function requeueReview(id) {
+  if (!confirm('Requeue this pending review? Use this only when the job is stuck and not present in Celery.')) return;
+  await api('POST', `/reviews/${id}/requeue`);
+  closeModal('modal-review-detail');
+  await loadReviews();
 }
 
 async function restartReview(id) {

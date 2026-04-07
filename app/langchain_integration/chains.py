@@ -198,14 +198,17 @@ def _coerce_positive_int(value: Any) -> int | None:
     return number if number > 0 else None
 
 
-def _normalize_comment(c: dict) -> dict:
-    line_number = _coerce_positive_int(c.get("start_line"))
-    if line_number is None:
-        line_number = _coerce_positive_int(c.get("line_number"))
+def _coerce_positive_int_from_keys(payload: dict, *keys: str) -> int | None:
+    for key in keys:
+        number = _coerce_positive_int(payload.get(key))
+        if number is not None:
+            return number
+    return None
 
-    line_end = _coerce_positive_int(c.get("end_line"))
-    if line_end is None:
-        line_end = _coerce_positive_int(c.get("line_end"))
+
+def _normalize_comment(c: dict) -> dict:
+    line_number = _coerce_positive_int_from_keys(c, "start_line", "line_number")
+    line_end = _coerce_positive_int_from_keys(c, "end_line", "line_end")
     if line_number is not None and line_end is not None and line_end < line_number:
         line_number, line_end = line_end, line_number
 
