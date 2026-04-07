@@ -526,45 +526,141 @@ function hideLoginError() {
   document.getElementById('login-error').classList.add('hidden');
 }
 
+// ── Debug logging ──────────────────────────────────────────────────────────────
+function debugLog(step, details) {
+  const timestamp = new Date().toISOString();
+  if (details === undefined) {
+    console.log(`[AI Code Reviewer][${timestamp}] ${step}`);
+    return;
+  }
+  console.log(`[AI Code Reviewer][${timestamp}] ${step}`, details);
+}
+
+function debugWarn(step, details) {
+  const timestamp = new Date().toISOString();
+  console.warn(`[AI Code Reviewer][${timestamp}] ${step}`, details);
+}
+
+function debugError(step, details) {
+  const timestamp = new Date().toISOString();
+  console.error(`[AI Code Reviewer][${timestamp}] ${step}`, details);
+}
+
+function summarizeBody(body) {
+  if (body === undefined || body === null) return body;
+  if (Array.isArray(body)) return { type: 'array', length: body.length };
+  if (typeof body !== 'object') return body;
+  const summary = {};
+  Object.keys(body).forEach(key => {
+    if (key.toLowerCase().includes('password')) summary[key] = '[redacted]';
+    else if (key.toLowerCase().includes('token')) summary[key] = '[redacted]';
+    else if (typeof body[key] === 'string' && body[key].length > 120) summary[key] = `${body[key].slice(0, 117)}...`;
+    else summary[key] = body[key];
+  });
+  return summary;
+}
+
+window.addEventListener('error', event => {
+  debugError('Unhandled window error', {
+    message: event.message,
+    source: event.filename,
+    line: event.lineno,
+    column: event.colno,
+  });
+});
+
+window.addEventListener('unhandledrejection', event => {
+  debugError('Unhandled promise rejection', event.reason);
+});
+
 // ── API ────────────────────────────────────────────────────────────────────────
 async function api(method, path, body) {
   const opts = { method, headers: { 'Content-Type': 'application/json' } };
   if (token) opts.headers['Authorization'] = `Bearer ${token}`;
   if (body !== undefined) opts.body = JSON.stringify(body);
-  const r = await fetch('/api/v1' + path, opts);
+  debugLog('API request start', {
+    method,
+    path,
+    hasToken: !!token,
+    body: summarizeBody(body),
+  });
+  let r;
+  try {
+    r = await fetch('/api/v1' + path, opts);
+  } catch (error) {
+    debugError('API request failed before response', {
+      method,
+      path,
+      error: error && error.message ? error.message : String(error),
+    });
+    throw error;
+  }
+  debugLog('API response received', {
+    method,
+    path,
+    status: r.status,
+    ok: r.ok,
+  });
   if (r.status === 401) {
     const err = await r.json().catch(() => ({ detail: 'Not authenticated' }));
+    debugWarn('API unauthorized response', { method, path, detail: err.detail || 'Not authenticated' });
     if (path !== '/auth/token') doLogout();
     throw new Error(err.detail || 'Not authenticated');
   }
   if (!r.ok) {
     const err = await r.json().catch(() => ({ detail: r.statusText }));
+    debugWarn('API non-OK response', { method, path, status: r.status, detail: err.detail || r.statusText });
     throw new Error(err.detail || JSON.stringify(err));
   }
-  if (r.status === 204) return null;
-  return r.json();
+  if (r.status === 204) {
+    debugLog('API response has no content', { method, path });
+    return null;
+  }
+  const payload = await r.json();
+  debugLog('API response parsed', {
+    method,
+    path,
+    payloadType: Array.isArray(payload) ? 'array' : typeof payload,
+    arrayLength: Array.isArray(payload) ? payload.length : undefined,
+    keys: payload && typeof payload === 'object' && !Array.isArray(payload) ? Object.keys(payload) : undefined,
+  });
+  return payload;
 }
 
 // ── Auth ───────────────────────────────────────────────────────────────────────
 async function doLogin() {
   const username = document.getElementById('login-username').value.trim();
   const password = document.getElementById('login-password').value;
+  debugLog('Login started', {
+    username,
+    passwordLength: password.length,
+  });
   hideLoginError();
   try {
     const data = await api('POST', '/auth/token', { username, password });
     if (!data || !data.access_token) {
       throw new Error('Login failed: missing access token in response');
     }
+    debugLog('Login token response accepted', {
+      tokenType: data.token_type,
+      hasAccessToken: !!data.access_token,
+      accessTokenLength: data.access_token ? data.access_token.length : 0,
+    });
     token = data.access_token;
     localStorage.setItem('token', token);
+    debugLog('Access token stored', {
+      localStorageTokenPresent: !!localStorage.getItem('token'),
+    });
     await initApp();
   } catch (e) {
+    debugError('Login failed', e);
     showLoginError(e.message);
   }
 }
 
 function doLogout(options) {
   const preserveLoginError = !!(options && options.preserveLoginError);
+  debugLog('Logout invoked', { preserveLoginError, hadToken: !!token, hadCurrentUser: !!currentUser });
   localStorage.removeItem('token');
   token = null;
   currentUser = null;
@@ -574,23 +670,40 @@ function doLogout(options) {
 }
 
 async function initApp() {
+  debugLog('App initialization started', {
+    tokenPresent: !!token,
+    tokenLength: token ? token.length : 0,
+  });
   try {
     currentUser = await api('GET', '/auth/me');
+    debugLog('Current user loaded', currentUser ? {
+      id: currentUser.id,
+      username: currentUser.username,
+      role: currentUser.role,
+      is_active: currentUser.is_active,
+    } : null);
     if (!currentUser) return;
     document.getElementById('sidebar-username').textContent = currentUser.username;
     document.getElementById('sidebar-role').textContent = currentUser.role;
     document.getElementById('login-page').classList.add('hidden');
     document.getElementById('app').classList.remove('hidden');
     document.getElementById('app').style.display = 'flex';
+    debugLog('App shell displayed', {
+      loginHidden: document.getElementById('login-page').classList.contains('hidden'),
+      appHidden: document.getElementById('app').classList.contains('hidden'),
+      appDisplay: document.getElementById('app').style.display,
+    });
 
     // Hide admin-only elements for non-admins
     if (currentUser.role !== 'admin') {
+      debugLog('Applying non-admin visibility rules', { role: currentUser.role });
       forEachNode('.admin-only', el => el.classList.add('hidden'));
     }
 
+    debugLog('Navigating to default page', { page: 'dashboard' });
     showPage('dashboard');
   } catch (e) {
-    console.error('App initialization failed:', e);
+    debugError('App initialization failed', e);
     doLogout({ preserveLoginError: true });
     showLoginError(e && e.message ? e.message : 'Login succeeded, but the app failed to initialize.');
   }
@@ -604,6 +717,7 @@ const pageTitles = {
 };
 
 function renderPage(name) {
+  debugLog('Render page start', { name });
   forEachNode('.page', p => p.classList.remove('active'));
   document.getElementById('page-' + name).classList.add('active');
   forEachNode('#sidebar nav a', a => a.classList.remove('active'));
@@ -611,29 +725,48 @@ function renderPage(name) {
     if (a.getAttribute('onclick') === `showPage('${name}')`) a.classList.add('active');
   });
   document.getElementById('page-title').textContent = pageTitles[name];
+  debugLog('Render page complete', {
+    name,
+    title: pageTitles[name],
+    activePageExists: !!document.querySelector('#page-' + name + '.active'),
+  });
   loadPage(name);
 }
 
 async function loadPage(name) {
-  if (name === 'dashboard') await loadDashboard();
-  else if (name === 'endpoints') await loadEndpoints();
-  else if (name === 'models') await loadModels();
-  else if (name === 'git-servers') await loadGitServers();
-  else if (name === 'repositories') await loadRepos();
-  else if (name === 'users') await loadUsers();
-  else if (name === 'prompts') await loadPrompts();
-  else if (name === 'reviews') await loadReviews();
-  else if (name === 'workers') await loadWorkers();
+  debugLog('Load page start', { name });
+  try {
+    if (name === 'dashboard') await loadDashboard();
+    else if (name === 'endpoints') await loadEndpoints();
+    else if (name === 'models') await loadModels();
+    else if (name === 'git-servers') await loadGitServers();
+    else if (name === 'repositories') await loadRepos();
+    else if (name === 'users') await loadUsers();
+    else if (name === 'prompts') await loadPrompts();
+    else if (name === 'reviews') await loadReviews();
+    else if (name === 'workers') await loadWorkers();
+    debugLog('Load page complete', { name });
+  } catch (error) {
+    debugError('Load page failed', { name, error });
+    throw error;
+  }
 }
 
 // ── Dashboard ──────────────────────────────────────────────────────────────────
 async function loadDashboard() {
+  debugLog('Dashboard load started');
   const [jobs, repos, eps, gitServers] = await Promise.all([
     api('GET', '/reviews').catch(() => []),
     api('GET', '/repositories').catch(() => []),
     api('GET', '/llm-endpoints').catch(() => []),
     api('GET', '/git-servers').catch(() => []),
   ]);
+  debugLog('Dashboard data received', {
+    jobs: (jobs || []).length,
+    repos: (repos || []).length,
+    endpoints: (eps || []).length,
+    gitServers: (gitServers || []).length,
+  });
   const completed = (jobs||[]).filter(j => j.status === 'completed').length;
   const failed = (jobs||[]).filter(j => j.status === 'failed').length;
   document.getElementById('dash-stats').innerHTML = `
@@ -1478,6 +1611,7 @@ function toggleAutoRefresh() {
 
 // Stop auto-refresh when leaving the workers page
 function showPage(name) {
+  debugLog('showPage invoked', { name, autoRefreshActive: !!_autoRefreshTimer });
   if (name !== 'workers' && _autoRefreshTimer) {
     clearInterval(_autoRefreshTimer);
     _autoRefreshTimer = null;
@@ -1508,9 +1642,17 @@ document.addEventListener('keypress', e => {
 });
 
 // ── Boot ───────────────────────────────────────────────────────────────────────
+debugLog('Boot script evaluated', {
+  tokenPresent: !!token,
+  tokenLength: token ? token.length : 0,
+  currentPath: window.location.pathname,
+  userAgent: navigator.userAgent,
+});
 if (token) {
+  debugLog('Boot found existing token, calling initApp');
   initApp();
 } else {
+  debugLog('Boot found no token, showing login page');
   document.getElementById('login-page').classList.remove('hidden');
 }
 </script>
