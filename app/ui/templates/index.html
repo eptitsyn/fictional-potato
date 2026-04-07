@@ -1,0 +1,1172 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>AI Code Reviewer</title>
+<style>
+  :root {
+    --bg: #0f1117;
+    --surface: #1a1d27;
+    --surface2: #242736;
+    --border: #2e3348;
+    --accent: #6c63ff;
+    --accent-hover: #7c74ff;
+    --danger: #e05c5c;
+    --success: #4ade80;
+    --warning: #fbbf24;
+    --text: #e2e8f0;
+    --text-muted: #8892a4;
+    --radius: 8px;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: 'Segoe UI', system-ui, sans-serif; background: var(--bg); color: var(--text); min-height: 100vh; display: flex; }
+
+  /* Sidebar */
+  #sidebar { width: 220px; background: var(--surface); border-right: 1px solid var(--border); display: flex; flex-direction: column; flex-shrink: 0; }
+  #sidebar .logo { padding: 20px 16px; font-weight: 700; font-size: 15px; border-bottom: 1px solid var(--border); color: var(--accent); }
+  #sidebar .logo span { opacity: .6; font-weight: 400; font-size: 12px; display: block; margin-top: 2px; color: var(--text-muted); }
+  #sidebar nav { flex: 1; padding: 12px 0; }
+  #sidebar nav a { display: flex; align-items: center; gap: 10px; padding: 10px 16px; color: var(--text-muted); text-decoration: none; font-size: 14px; cursor: pointer; transition: all .15s; border-left: 3px solid transparent; }
+  #sidebar nav a:hover { color: var(--text); background: var(--surface2); }
+  #sidebar nav a.active { color: var(--accent); border-left-color: var(--accent); background: rgba(108,99,255,.1); }
+  #sidebar nav a .icon { font-size: 16px; width: 20px; text-align: center; }
+  #sidebar .user-bar { padding: 12px 16px; border-top: 1px solid var(--border); font-size: 13px; color: var(--text-muted); display: flex; justify-content: space-between; align-items: center; }
+  #sidebar .user-bar strong { color: var(--text); }
+  #sidebar .user-bar button { background: none; border: none; color: var(--danger); cursor: pointer; font-size: 12px; }
+
+  /* Main */
+  #main { flex: 1; display: flex; flex-direction: column; overflow: hidden; }
+  #header { padding: 16px 24px; border-bottom: 1px solid var(--border); background: var(--surface); display: flex; align-items: center; justify-content: space-between; }
+  #header h1 { font-size: 18px; font-weight: 600; }
+  #content { flex: 1; overflow-y: auto; padding: 24px; }
+
+  /* Login */
+  #login-page { display: flex; align-items: center; justify-content: center; min-height: 100vh; background: var(--bg); width: 100%; }
+  .login-box { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 40px; width: 360px; }
+  .login-box h2 { margin-bottom: 8px; font-size: 22px; }
+  .login-box p { color: var(--text-muted); font-size: 13px; margin-bottom: 28px; }
+
+  /* Cards/Grid */
+  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 16px; }
+  .card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 16px; }
+  .card h3 { font-size: 14px; margin-bottom: 6px; }
+  .card .meta { font-size: 12px; color: var(--text-muted); }
+  .card .actions { margin-top: 12px; display: flex; gap: 8px; }
+
+  /* Table */
+  .table-wrap { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); overflow: hidden; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  thead { background: var(--surface2); }
+  th { padding: 10px 14px; text-align: left; font-weight: 600; color: var(--text-muted); font-size: 12px; text-transform: uppercase; letter-spacing: .05em; }
+  td { padding: 10px 14px; border-top: 1px solid var(--border); vertical-align: top; }
+  tr:hover td { background: rgba(255,255,255,.02); }
+
+  /* Badges */
+  .badge { display: inline-block; padding: 2px 8px; border-radius: 99px; font-size: 11px; font-weight: 600; }
+  .badge-admin { background: rgba(108,99,255,.2); color: var(--accent); }
+  .badge-reviewer { background: rgba(74,222,128,.15); color: var(--success); }
+  .badge-viewer { background: rgba(136,146,164,.15); color: var(--text-muted); }
+  .badge-completed { background: rgba(74,222,128,.15); color: var(--success); }
+  .badge-failed { background: rgba(224,92,92,.15); color: var(--danger); }
+  .badge-pending { background: rgba(251,191,36,.15); color: var(--warning); }
+  .badge-running { background: rgba(108,99,255,.2); color: var(--accent); }
+  .badge-active { background: rgba(74,222,128,.15); color: var(--success); }
+  .badge-inactive { background: rgba(224,92,92,.15); color: var(--danger); }
+  .badge-info { background: rgba(108,99,255,.2); color: var(--accent); }
+  .badge-warning { background: rgba(251,191,36,.15); color: var(--warning); }
+  .badge-error { background: rgba(224,92,92,.15); color: var(--danger); }
+
+  /* Forms */
+  .form-group { margin-bottom: 16px; }
+  label { display: block; font-size: 13px; color: var(--text-muted); margin-bottom: 6px; }
+  input, select, textarea { width: 100%; background: var(--surface2); border: 1px solid var(--border); color: var(--text); padding: 9px 12px; border-radius: var(--radius); font-size: 14px; outline: none; transition: border-color .15s; font-family: inherit; }
+  input:focus, select:focus, textarea:focus { border-color: var(--accent); }
+  textarea { min-height: 120px; resize: vertical; }
+  select option { background: var(--surface2); }
+
+  /* Buttons */
+  .btn { display: inline-flex; align-items: center; gap: 6px; padding: 8px 14px; border-radius: var(--radius); border: none; font-size: 13px; font-weight: 500; cursor: pointer; transition: all .15s; }
+  .btn-primary { background: var(--accent); color: #fff; }
+  .btn-primary:hover { background: var(--accent-hover); }
+  .btn-secondary { background: var(--surface2); color: var(--text); border: 1px solid var(--border); }
+  .btn-secondary:hover { background: var(--border); }
+  .btn-danger { background: rgba(224,92,92,.15); color: var(--danger); border: 1px solid rgba(224,92,92,.3); }
+  .btn-danger:hover { background: var(--danger); color: #fff; }
+  .btn-sm { padding: 5px 10px; font-size: 12px; }
+  .btn:disabled { opacity: .5; cursor: not-allowed; }
+
+  /* Modal */
+  .modal-overlay { position: fixed; inset: 0; background: rgba(0,0,0,.7); display: flex; align-items: center; justify-content: center; z-index: 100; }
+  .modal { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 28px; width: 520px; max-width: 95vw; max-height: 90vh; overflow-y: auto; }
+  .modal h2 { font-size: 18px; margin-bottom: 20px; }
+  .modal-actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 20px; }
+
+  /* Alert */
+  .alert { padding: 10px 14px; border-radius: var(--radius); font-size: 13px; margin-bottom: 16px; }
+  .alert-error { background: rgba(224,92,92,.15); border: 1px solid rgba(224,92,92,.3); color: var(--danger); }
+  .alert-success { background: rgba(74,222,128,.1); border: 1px solid rgba(74,222,128,.3); color: var(--success); }
+
+  /* Toolbar */
+  .toolbar { display: flex; align-items: center; justify-content: space-between; margin-bottom: 16px; }
+  .toolbar h2 { font-size: 16px; font-weight: 600; }
+
+  /* Stats */
+  .stats { display: grid; grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)); gap: 16px; margin-bottom: 24px; }
+  .stat-card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 16px; }
+  .stat-card .val { font-size: 28px; font-weight: 700; }
+  .stat-card .lbl { font-size: 12px; color: var(--text-muted); margin-top: 4px; }
+
+  /* Prompt content */
+  .prompt-content { background: var(--surface2); border: 1px solid var(--border); border-radius: var(--radius); padding: 12px; font-size: 12px; font-family: monospace; white-space: pre-wrap; word-break: break-word; max-height: 200px; overflow-y: auto; color: var(--text-muted); }
+
+  /* Workers page */
+  .worker-card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); margin-bottom: 16px; overflow: hidden; }
+  .worker-card .worker-header { display: flex; align-items: center; gap: 12px; padding: 14px 16px; background: var(--surface2); border-bottom: 1px solid var(--border); }
+  .worker-card .worker-header .wname { font-weight: 600; font-size: 14px; flex: 1; font-family: monospace; }
+  .worker-card .worker-body { padding: 16px; display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 12px; }
+  .worker-stat { }
+  .worker-stat .ws-label { font-size: 11px; color: var(--text-muted); text-transform: uppercase; letter-spacing: .05em; margin-bottom: 4px; }
+  .worker-stat .ws-val { font-size: 18px; font-weight: 700; }
+  .task-list { padding: 0 16px 16px; }
+  .task-item { background: var(--surface2); border: 1px solid var(--border); border-radius: 6px; padding: 10px 12px; margin-bottom: 8px; font-size: 12px; }
+  .task-item .task-name { font-weight: 600; font-size: 13px; margin-bottom: 4px; }
+  .task-item .task-meta { color: var(--text-muted); }
+  .pulse { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: var(--success); animation: pulse 2s infinite; }
+  .pulse.offline { background: var(--danger); animation: none; }
+  @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.4} }
+  .queue-bar-wrap { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 16px; margin-bottom: 16px; }
+  .queue-row { display: flex; align-items: center; gap: 12px; margin-bottom: 8px; }
+  .queue-row:last-child { margin-bottom: 0; }
+  .queue-name { font-size: 13px; font-weight: 600; width: 100px; font-family: monospace; }
+  .queue-bar-bg { flex: 1; background: var(--surface2); border-radius: 99px; height: 8px; overflow: hidden; }
+  .queue-bar { height: 100%; background: var(--accent); border-radius: 99px; transition: width .4s; min-width: 4px; }
+  .queue-count { font-size: 13px; font-weight: 700; width: 40px; text-align: right; }
+  .refresh-btn { font-size: 13px; }
+  #workers-last-refresh { font-size: 12px; color: var(--text-muted); }
+
+  /* Comment list */
+  .comment { background: var(--surface2); border: 1px solid var(--border); border-radius: var(--radius); padding: 12px; margin-bottom: 10px; }
+  .comment .comment-header { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; font-size: 12px; color: var(--text-muted); }
+  .comment .comment-body { font-size: 13px; white-space: pre-wrap; }
+
+  /* Hidden */
+  .hidden { display: none !important; }
+
+  /* Page sections */
+  .page { display: none; }
+  .page.active { display: block; }
+
+  /* Monospace */
+  code { font-family: 'Cascadia Code', 'Fira Code', monospace; font-size: 12px; }
+</style>
+</head>
+<body>
+
+<!-- LOGIN PAGE -->
+<div id="login-page" class="hidden">
+  <div class="login-box">
+    <h2>🤖 AI Code Reviewer</h2>
+    <p>Sign in to manage your configuration</p>
+    <div id="login-error" class="alert alert-error hidden"></div>
+    <div class="form-group">
+      <label>Username or Email</label>
+      <input id="login-username" type="text" placeholder="admin" autofocus>
+    </div>
+    <div class="form-group">
+      <label>Password</label>
+      <input id="login-password" type="password" placeholder="••••••••">
+    </div>
+    <button class="btn btn-primary" style="width:100%" onclick="doLogin()">Sign In</button>
+  </div>
+</div>
+
+<!-- APP SHELL -->
+<div id="app" class="hidden" style="display:flex;width:100%">
+  <div id="sidebar">
+    <div class="logo">AI Code Reviewer <span>v1.0</span></div>
+    <nav>
+      <a onclick="showPage('dashboard')" class="active"><span class="icon">📊</span> Dashboard</a>
+      <a onclick="showPage('endpoints')"><span class="icon">🔌</span> LLM Endpoints</a>
+      <a onclick="showPage('models')"><span class="icon">🧠</span> LLM Models</a>
+      <a onclick="showPage('repositories')"><span class="icon">📁</span> Repositories</a>
+      <a onclick="showPage('users')"><span class="icon">👥</span> Users</a>
+      <a onclick="showPage('prompts')"><span class="icon">💬</span> Prompts</a>
+      <a onclick="showPage('reviews')"><span class="icon">🔍</span> Reviews</a>
+      <a onclick="showPage('workers')"><span class="icon">⚙️</span> Workers</a>
+    </nav>
+    <div class="user-bar">
+      <div><strong id="sidebar-username">—</strong><br><small id="sidebar-role">—</small></div>
+      <button onclick="doLogout()">Logout</button>
+    </div>
+  </div>
+
+  <div id="main">
+    <div id="header"><h1 id="page-title">Dashboard</h1></div>
+    <div id="content">
+
+      <!-- DASHBOARD -->
+      <div id="page-dashboard" class="page active">
+        <div class="stats" id="dash-stats"></div>
+        <div class="toolbar"><h2>Recent Reviews</h2></div>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>ID</th><th>Repository</th><th>Type</th><th>Status</th><th>Created</th><th></th></tr></thead>
+            <tbody id="dash-jobs"></tbody>
+          </table>
+        </div>
+      </div>
+
+      <!-- ENDPOINTS -->
+      <div id="page-endpoints" class="page">
+        <div class="toolbar">
+          <h2>LLM Endpoints</h2>
+          <button class="btn btn-primary" onclick="openEndpointModal()">+ Add Endpoint</button>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>Name</th><th>Base URL</th><th>Status</th><th>Actions</th></tr></thead>
+            <tbody id="endpoints-body"></tbody>
+          </table>
+        </div>
+      </div>
+
+      <!-- MODELS -->
+      <div id="page-models" class="page">
+        <div class="toolbar">
+          <h2>LLM Models</h2>
+          <button class="btn btn-primary" onclick="openModelModal()">+ Add Model</button>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>Name</th><th>Endpoint</th><th>Tokens</th><th>Temp</th><th>Default</th><th>Status</th><th>Actions</th></tr></thead>
+            <tbody id="models-body"></tbody>
+          </table>
+        </div>
+      </div>
+
+      <!-- REPOSITORIES -->
+      <div id="page-repositories" class="page">
+        <div class="toolbar">
+          <h2>Repositories</h2>
+          <button class="btn btn-primary" onclick="openRepoModal()">+ Add Repository</button>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>Name</th><th>GitLab ID</th><th>Commits</th><th>MRs</th><th>Status</th><th>Actions</th></tr></thead>
+            <tbody id="repos-body"></tbody>
+          </table>
+        </div>
+      </div>
+
+      <!-- USERS -->
+      <div id="page-users" class="page">
+        <div class="toolbar">
+          <h2>Users</h2>
+          <button class="btn btn-primary" onclick="openUserModal()">+ Add User</button>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>Username</th><th>Email</th><th>Role</th><th>Status</th><th>Actions</th></tr></thead>
+            <tbody id="users-body"></tbody>
+          </table>
+        </div>
+      </div>
+
+      <!-- PROMPTS -->
+      <div id="page-prompts" class="page">
+        <div class="toolbar">
+          <h2>Prompts</h2>
+          <button class="btn btn-primary" onclick="openPromptModal()">+ Add Prompt</button>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>Name</th><th>Type</th><th>Scope</th><th>Default</th><th>Status</th><th>Actions</th></tr></thead>
+            <tbody id="prompts-body"></tbody>
+          </table>
+        </div>
+      </div>
+
+      <!-- REVIEWS -->
+      <div id="page-reviews" class="page">
+        <div class="toolbar">
+          <h2>Review Jobs</h2>
+          <button class="btn btn-primary" onclick="openTriggerModal()">▶ Trigger Review</button>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>ID</th><th>Repository</th><th>Type</th><th>Ref</th><th>Status</th><th>Created</th><th>Actions</th></tr></thead>
+            <tbody id="reviews-body"></tbody>
+          </table>
+        </div>
+      </div>
+
+      <!-- WORKERS -->
+      <div id="page-workers" class="page">
+        <div class="toolbar">
+          <h2>Worker Status</h2>
+          <div style="display:flex;align-items:center;gap:12px">
+            <span id="workers-last-refresh"></span>
+            <button class="btn btn-secondary refresh-btn" onclick="loadWorkers()">↻ Refresh</button>
+            <button class="btn btn-secondary refresh-btn" id="workers-auto-btn" onclick="toggleAutoRefresh()">Auto-refresh: OFF</button>
+          </div>
+        </div>
+
+        <!-- Queue depths -->
+        <div style="margin-bottom:8px;font-size:12px;font-weight:600;color:var(--text-muted);text-transform:uppercase;letter-spacing:.05em">Queue Depths</div>
+        <div id="workers-queues" class="queue-bar-wrap">
+          <div style="color:var(--text-muted);font-size:13px">Loading…</div>
+        </div>
+
+        <!-- Worker cards -->
+        <div style="margin-bottom:8px;font-size:12px;font-weight:600;color:var(--text-muted);text-transform:uppercase;letter-spacing:.05em">Workers</div>
+        <div id="workers-list">
+          <div style="color:var(--text-muted);font-size:13px;padding:16px">Loading…</div>
+        </div>
+      </div>
+
+    </div><!-- /content -->
+  </div><!-- /main -->
+</div><!-- /app -->
+
+<!-- ═══════════════════════════ MODALS ═══════════════════════════ -->
+
+<!-- Endpoint Modal -->
+<div id="modal-endpoint" class="modal-overlay hidden">
+  <div class="modal">
+    <h2 id="endpoint-modal-title">Add LLM Endpoint</h2>
+    <div id="endpoint-error" class="alert alert-error hidden"></div>
+    <div class="form-group"><label>Name</label><input id="ep-name" placeholder="OpenAI, Ollama local..."></div>
+    <div class="form-group"><label>Base URL</label><input id="ep-url" placeholder="https://api.openai.com/v1"></div>
+    <div class="form-group"><label>API Key (leave blank to keep existing)</label><input id="ep-key" type="password" placeholder="sk-..."></div>
+    <div class="form-group"><label>Status</label><select id="ep-active"><option value="true">Active</option><option value="false">Inactive</option></select></div>
+    <div class="modal-actions">
+      <button class="btn btn-secondary" onclick="closeModal('modal-endpoint')">Cancel</button>
+      <button class="btn btn-primary" onclick="saveEndpoint()">Save</button>
+    </div>
+  </div>
+</div>
+
+<!-- Model Modal -->
+<div id="modal-model" class="modal-overlay hidden">
+  <div class="modal">
+    <h2 id="model-modal-title">Add LLM Model</h2>
+    <div id="model-error" class="alert alert-error hidden"></div>
+    <div class="form-group"><label>Endpoint</label><select id="m-endpoint"></select></div>
+    <div class="form-group"><label>Model Name</label><input id="m-name" placeholder="gpt-4o, llama3, mistral-large..."></div>
+    <div class="form-group"><label>Display Name</label><input id="m-display" placeholder="Optional friendly name"></div>
+    <div class="form-group"><label>Max Context Tokens</label><input id="m-tokens" type="number" value="8192"></div>
+    <div class="form-group"><label>Temperature</label><input id="m-temp" type="number" step="0.1" min="0" max="2" value="0.2"></div>
+    <div class="form-group"><label>Global Default?</label><select id="m-default"><option value="false">No</option><option value="true">Yes</option></select></div>
+    <div class="modal-actions">
+      <button class="btn btn-secondary" onclick="closeModal('modal-model')">Cancel</button>
+      <button class="btn btn-primary" onclick="saveModel()">Save</button>
+    </div>
+  </div>
+</div>
+
+<!-- Repository Modal -->
+<div id="modal-repo" class="modal-overlay hidden">
+  <div class="modal">
+    <h2 id="repo-modal-title">Add Repository</h2>
+    <div id="repo-error" class="alert alert-error hidden"></div>
+    <div class="form-group"><label>GitLab Project ID</label><input id="r-pid" type="number" placeholder="12345"></div>
+    <div class="form-group"><label>Name</label><input id="r-name" placeholder="my-org/my-repo"></div>
+    <div class="form-group"><label>GitLab Instance URL</label><input id="r-url" placeholder="https://gitlab.com"></div>
+    <div class="form-group"><label>GitLab Access Token</label><input id="r-token" type="password" placeholder="glpat-..."></div>
+    <div class="form-group"><label>Webhook Secret</label><input id="r-secret" type="password" placeholder="random secret string"></div>
+    <div class="form-group"><label>LLM Model (leave blank = global default)</label><select id="r-model"><option value="">Global default</option></select></div>
+    <div class="form-group"><label>Review Commits</label><select id="r-commits"><option value="true">Yes</option><option value="false">No</option></select></div>
+    <div class="form-group"><label>Review Merge Requests</label><select id="r-mrs"><option value="true">Yes</option><option value="false">No</option></select></div>
+    <div class="modal-actions">
+      <button class="btn btn-secondary" onclick="closeModal('modal-repo')">Cancel</button>
+      <button class="btn btn-primary" onclick="saveRepo()">Save</button>
+    </div>
+  </div>
+</div>
+
+<!-- User Modal -->
+<div id="modal-user" class="modal-overlay hidden">
+  <div class="modal">
+    <h2 id="user-modal-title">Add User</h2>
+    <div id="user-error" class="alert alert-error hidden"></div>
+    <div class="form-group"><label>Username</label><input id="u-username" placeholder="jsmith"></div>
+    <div class="form-group"><label>Email</label><input id="u-email" type="email" placeholder="j@example.com"></div>
+    <div class="form-group"><label>Password</label><input id="u-pass" type="password" placeholder="(leave blank to keep)"></div>
+    <div class="form-group"><label>Role</label><select id="u-role"><option value="viewer">Viewer</option><option value="reviewer">Reviewer</option><option value="admin">Admin</option></select></div>
+    <div class="modal-actions">
+      <button class="btn btn-secondary" onclick="closeModal('modal-user')">Cancel</button>
+      <button class="btn btn-primary" onclick="saveUser()">Save</button>
+    </div>
+  </div>
+</div>
+
+<!-- Prompt Modal -->
+<div id="modal-prompt" class="modal-overlay hidden">
+  <div class="modal">
+    <h2 id="prompt-modal-title">Add Prompt</h2>
+    <div id="prompt-error" class="alert alert-error hidden"></div>
+    <div class="form-group"><label>Name</label><input id="p-name" placeholder="My review prompt"></div>
+    <div class="form-group"><label>Type</label><select id="p-type"><option value="system">System</option><option value="commit_review">Commit Review</option><option value="mr_review">MR Review</option></select></div>
+    <div class="form-group"><label>Content</label><textarea id="p-content" rows="10" placeholder="Use {diff}, {commit_sha}, {mr_title} etc as placeholders"></textarea></div>
+    <div class="form-group"><label>Set as Global Default?</label><select id="p-default"><option value="false">No</option><option value="true">Yes (admin only)</option></select></div>
+    <div class="modal-actions">
+      <button class="btn btn-secondary" onclick="closeModal('modal-prompt')">Cancel</button>
+      <button class="btn btn-primary" onclick="savePrompt()">Save</button>
+    </div>
+  </div>
+</div>
+
+<!-- Trigger Review Modal -->
+<div id="modal-trigger" class="modal-overlay hidden">
+  <div class="modal">
+    <h2>Trigger Review</h2>
+    <div id="trigger-error" class="alert alert-error hidden"></div>
+    <div class="form-group"><label>Repository</label><select id="tr-repo"></select></div>
+    <div class="form-group"><label>Type</label><select id="tr-type" onchange="updateTriggerFields()"><option value="commit">Commit</option><option value="mr">Merge Request</option></select></div>
+    <div class="form-group" id="tr-sha-group"><label>Commit SHA</label><input id="tr-sha" placeholder="abc123..."></div>
+    <div class="form-group hidden" id="tr-mr-group"><label>MR IID</label><input id="tr-mr" type="number" placeholder="42"></div>
+    <div class="modal-actions">
+      <button class="btn btn-secondary" onclick="closeModal('modal-trigger')">Cancel</button>
+      <button class="btn btn-primary" onclick="saveTrigger()">Trigger</button>
+    </div>
+  </div>
+</div>
+
+<!-- Review Detail Modal -->
+<div id="modal-review-detail" class="modal-overlay hidden">
+  <div class="modal" style="width:700px">
+    <h2>Review Job Details</h2>
+    <div id="review-detail-content"></div>
+    <div class="modal-actions">
+      <button class="btn btn-secondary" onclick="closeModal('modal-review-detail')">Close</button>
+    </div>
+  </div>
+</div>
+
+<script>
+// ── State ──────────────────────────────────────────────────────────────────────
+let token = localStorage.getItem('token');
+let currentUser = null;
+let editingId = null;
+let allEndpoints = [];
+let allModels = [];
+let allRepos = [];
+
+// ── API ────────────────────────────────────────────────────────────────────────
+async function api(method, path, body) {
+  const opts = { method, headers: { 'Content-Type': 'application/json' } };
+  if (token) opts.headers['Authorization'] = `Bearer ${token}`;
+  if (body !== undefined) opts.body = JSON.stringify(body);
+  const r = await fetch('/api/v1' + path, opts);
+  if (r.status === 401) { doLogout(); return null; }
+  if (!r.ok) {
+    const err = await r.json().catch(() => ({ detail: r.statusText }));
+    throw new Error(err.detail || JSON.stringify(err));
+  }
+  if (r.status === 204) return null;
+  return r.json();
+}
+
+// ── Auth ───────────────────────────────────────────────────────────────────────
+async function doLogin() {
+  const username = document.getElementById('login-username').value.trim();
+  const password = document.getElementById('login-password').value;
+  const errEl = document.getElementById('login-error');
+  errEl.classList.add('hidden');
+  try {
+    const data = await api('POST', '/auth/token', { username, password });
+    token = data.access_token;
+    localStorage.setItem('token', token);
+    await initApp();
+  } catch (e) {
+    errEl.textContent = e.message;
+    errEl.classList.remove('hidden');
+  }
+}
+
+function doLogout() {
+  localStorage.removeItem('token');
+  token = null;
+  currentUser = null;
+  document.getElementById('app').classList.add('hidden');
+  document.getElementById('login-page').classList.remove('hidden');
+}
+
+async function initApp() {
+  try {
+    currentUser = await api('GET', '/auth/me');
+    if (!currentUser) return;
+    document.getElementById('sidebar-username').textContent = currentUser.username;
+    document.getElementById('sidebar-role').textContent = currentUser.role;
+    document.getElementById('login-page').classList.add('hidden');
+    document.getElementById('app').classList.remove('hidden');
+    document.getElementById('app').style.display = 'flex';
+
+    // Hide admin-only elements for non-admins
+    if (currentUser.role !== 'admin') {
+      document.querySelectorAll('.admin-only').forEach(el => el.classList.add('hidden'));
+    }
+
+    showPage('dashboard');
+  } catch (e) {
+    doLogout();
+  }
+}
+
+// ── Pages ──────────────────────────────────────────────────────────────────────
+const pageTitles = {
+  dashboard: 'Dashboard', endpoints: 'LLM Endpoints', models: 'LLM Models',
+  repositories: 'Repositories', users: 'Users', prompts: 'Prompts', reviews: 'Review Jobs',
+  workers: 'Worker Status',
+};
+
+function showPage(name) {
+  document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
+  document.getElementById('page-' + name).classList.add('active');
+  document.querySelectorAll('#sidebar nav a').forEach(a => a.classList.remove('active'));
+  document.querySelectorAll('#sidebar nav a').forEach(a => {
+    if (a.getAttribute('onclick') === `showPage('${name}')`) a.classList.add('active');
+  });
+  document.getElementById('page-title').textContent = pageTitles[name];
+  loadPage(name);
+}
+
+async function loadPage(name) {
+  if (name === 'dashboard') await loadDashboard();
+  else if (name === 'endpoints') await loadEndpoints();
+  else if (name === 'models') await loadModels();
+  else if (name === 'repositories') await loadRepos();
+  else if (name === 'users') await loadUsers();
+  else if (name === 'prompts') await loadPrompts();
+  else if (name === 'reviews') await loadReviews();
+  else if (name === 'workers') await loadWorkers();
+}
+
+// ── Dashboard ──────────────────────────────────────────────────────────────────
+async function loadDashboard() {
+  const [jobs, repos, eps] = await Promise.all([
+    api('GET', '/reviews').catch(() => []),
+    api('GET', '/repositories').catch(() => []),
+    api('GET', '/llm-endpoints').catch(() => []),
+  ]);
+  const completed = (jobs||[]).filter(j => j.status === 'completed').length;
+  const failed = (jobs||[]).filter(j => j.status === 'failed').length;
+  document.getElementById('dash-stats').innerHTML = `
+    <div class="stat-card"><div class="val">${(repos||[]).length}</div><div class="lbl">Repositories</div></div>
+    <div class="stat-card"><div class="val">${(eps||[]).length}</div><div class="lbl">LLM Endpoints</div></div>
+    <div class="stat-card"><div class="val">${(jobs||[]).length}</div><div class="lbl">Total Reviews</div></div>
+    <div class="stat-card"><div class="val" style="color:var(--success)">${completed}</div><div class="lbl">Completed</div></div>
+    <div class="stat-card"><div class="val" style="color:var(--danger)">${failed}</div><div class="lbl">Failed</div></div>
+  `;
+  const repoMap = Object.fromEntries((repos||[]).map(r => [r.id, r.name]));
+  document.getElementById('dash-jobs').innerHTML = (jobs||[]).slice(0,10).map(j => `
+    <tr>
+      <td><code>${j.id.slice(0,8)}</code></td>
+      <td>${repoMap[j.repository_id] || j.repository_id.slice(0,8)}</td>
+      <td>${j.trigger_type}</td>
+      <td><span class="badge badge-${j.status}">${j.status}</span></td>
+      <td>${fmtDate(j.created_at)}</td>
+      <td><button class="btn btn-sm btn-secondary" onclick="viewReview('${j.id}')">View</button></td>
+    </tr>
+  `).join('');
+}
+
+// ── Endpoints ──────────────────────────────────────────────────────────────────
+async function loadEndpoints() {
+  allEndpoints = await api('GET', '/llm-endpoints') || [];
+  document.getElementById('endpoints-body').innerHTML = allEndpoints.map(e => `
+    <tr>
+      <td>${e.name}</td>
+      <td><code>${e.base_url}</code></td>
+      <td><span class="badge badge-${e.is_active ? 'active' : 'inactive'}">${e.is_active ? 'Active' : 'Inactive'}</span></td>
+      <td>
+        <button class="btn btn-sm btn-secondary" onclick="testEndpoint('${e.id}')">Test</button>
+        <button class="btn btn-sm btn-secondary" onclick="editEndpoint('${e.id}')">Edit</button>
+        <button class="btn btn-sm btn-danger" onclick="deleteEndpoint('${e.id}')">Delete</button>
+      </td>
+    </tr>
+  `).join('') || '<tr><td colspan="4" style="color:var(--text-muted);text-align:center">No endpoints yet</td></tr>';
+}
+
+function openEndpointModal(id) {
+  editingId = id || null;
+  document.getElementById('endpoint-modal-title').textContent = id ? 'Edit LLM Endpoint' : 'Add LLM Endpoint';
+  document.getElementById('endpoint-error').classList.add('hidden');
+  if (!id) { document.getElementById('ep-name').value=''; document.getElementById('ep-url').value=''; document.getElementById('ep-key').value=''; document.getElementById('ep-active').value='true'; }
+  document.getElementById('modal-endpoint').classList.remove('hidden');
+}
+
+async function editEndpoint(id) {
+  const ep = allEndpoints.find(e => e.id === id);
+  document.getElementById('ep-name').value = ep.name;
+  document.getElementById('ep-url').value = ep.base_url;
+  document.getElementById('ep-key').value = '';
+  document.getElementById('ep-active').value = String(ep.is_active);
+  openEndpointModal(id);
+}
+
+async function saveEndpoint() {
+  const errEl = document.getElementById('endpoint-error');
+  errEl.classList.add('hidden');
+  const body = {
+    name: document.getElementById('ep-name').value,
+    base_url: document.getElementById('ep-url').value,
+    is_active: document.getElementById('ep-active').value === 'true',
+  };
+  const key = document.getElementById('ep-key').value;
+  if (key) body.api_key = key;
+  try {
+    if (editingId) await api('PUT', `/llm-endpoints/${editingId}`, body);
+    else await api('POST', '/llm-endpoints', body);
+    closeModal('modal-endpoint');
+    loadEndpoints();
+  } catch(e) { errEl.textContent = e.message; errEl.classList.remove('hidden'); }
+}
+
+async function testEndpoint(id) {
+  const result = await api('POST', `/llm-endpoints/${id}/test`).catch(e => ({ status: 'error', detail: e.message }));
+  alert(JSON.stringify(result, null, 2));
+}
+
+async function deleteEndpoint(id) {
+  if (!confirm('Delete this endpoint and all its models?')) return;
+  await api('DELETE', `/llm-endpoints/${id}`);
+  loadEndpoints();
+}
+
+// ── Models ─────────────────────────────────────────────────────────────────────
+async function loadModels() {
+  allEndpoints = await api('GET', '/llm-endpoints') || [];
+  allModels = [];
+  for (const ep of allEndpoints) {
+    const models = await api('GET', `/llm-endpoints/${ep.id}/models`) || [];
+    models.forEach(m => { m._endpoint_name = ep.name; allModels.push(m); });
+  }
+  document.getElementById('models-body').innerHTML = allModels.map(m => `
+    <tr>
+      <td>${m.display_name || m.model_name}</td>
+      <td>${m._endpoint_name}</td>
+      <td>${m.max_context_tokens.toLocaleString()}</td>
+      <td>${m.temperature}</td>
+      <td>${m.is_global_default ? '<span class="badge badge-admin">Default</span>' : '—'}</td>
+      <td><span class="badge badge-${m.is_active ? 'active' : 'inactive'}">${m.is_active ? 'Active' : 'Inactive'}</span></td>
+      <td>
+        <button class="btn btn-sm btn-secondary" onclick="editModel('${m.id}')">Edit</button>
+        <button class="btn btn-sm btn-danger" onclick="deleteModel('${m.id}')">Delete</button>
+      </td>
+    </tr>
+  `).join('') || '<tr><td colspan="7" style="color:var(--text-muted);text-align:center">No models yet</td></tr>';
+}
+
+async function openModelModal(id) {
+  editingId = id || null;
+  document.getElementById('model-modal-title').textContent = id ? 'Edit Model' : 'Add Model';
+  document.getElementById('model-error').classList.add('hidden');
+  const sel = document.getElementById('m-endpoint');
+  sel.innerHTML = allEndpoints.map(e => `<option value="${e.id}">${e.name}</option>`).join('');
+  if (!id) { document.getElementById('m-name').value=''; document.getElementById('m-display').value=''; document.getElementById('m-tokens').value=8192; document.getElementById('m-temp').value=0.2; document.getElementById('m-default').value='false'; }
+  document.getElementById('modal-model').classList.remove('hidden');
+}
+
+async function editModel(id) {
+  const m = allModels.find(m => m.id === id);
+  await openModelModal(id);
+  document.getElementById('m-endpoint').value = m.endpoint_id;
+  document.getElementById('m-name').value = m.model_name;
+  document.getElementById('m-display').value = m.display_name || '';
+  document.getElementById('m-tokens').value = m.max_context_tokens;
+  document.getElementById('m-temp').value = m.temperature;
+  document.getElementById('m-default').value = String(m.is_global_default);
+}
+
+async function saveModel() {
+  const errEl = document.getElementById('model-error');
+  errEl.classList.add('hidden');
+  const endpointId = document.getElementById('m-endpoint').value;
+  const body = {
+    model_name: document.getElementById('m-name').value,
+    display_name: document.getElementById('m-display').value || null,
+    max_context_tokens: parseInt(document.getElementById('m-tokens').value),
+    temperature: parseFloat(document.getElementById('m-temp').value),
+    is_global_default: document.getElementById('m-default').value === 'true',
+  };
+  try {
+    if (editingId) await api('PUT', `/llm-models/${editingId}`, body);
+    else await api('POST', `/llm-endpoints/${endpointId}/models`, body);
+    closeModal('modal-model');
+    loadModels();
+  } catch(e) { errEl.textContent = e.message; errEl.classList.remove('hidden'); }
+}
+
+async function deleteModel(id) {
+  if (!confirm('Delete this model?')) return;
+  await api('DELETE', `/llm-models/${id}`);
+  loadModels();
+}
+
+// ── Repositories ───────────────────────────────────────────────────────────────
+async function loadRepos() {
+  allRepos = await api('GET', '/repositories') || [];
+  allModels = allModels.length ? allModels : await loadAllModels();
+  document.getElementById('repos-body').innerHTML = allRepos.map(r => `
+    <tr>
+      <td>${r.name}</td>
+      <td>${r.gitlab_project_id}</td>
+      <td>${r.review_commits ? '✅' : '❌'}</td>
+      <td>${r.review_mrs ? '✅' : '❌'}</td>
+      <td><span class="badge badge-${r.is_active ? 'active' : 'inactive'}">${r.is_active ? 'Active' : 'Inactive'}</span></td>
+      <td>
+        <button class="btn btn-sm btn-secondary" onclick="editRepo('${r.id}')">Edit</button>
+        <button class="btn btn-sm btn-danger" onclick="deleteRepo('${r.id}')">Delete</button>
+      </td>
+    </tr>
+  `).join('') || '<tr><td colspan="6" style="color:var(--text-muted);text-align:center">No repositories yet</td></tr>';
+}
+
+async function loadAllModels() {
+  const eps = await api('GET', '/llm-endpoints') || [];
+  const models = [];
+  for (const ep of eps) {
+    const ms = await api('GET', `/llm-endpoints/${ep.id}/models`) || [];
+    ms.forEach(m => { m._endpoint_name = ep.name; models.push(m); });
+  }
+  return models;
+}
+
+async function openRepoModal(id) {
+  editingId = id || null;
+  document.getElementById('repo-modal-title').textContent = id ? 'Edit Repository' : 'Add Repository';
+  document.getElementById('repo-error').classList.add('hidden');
+  const mods = allModels.length ? allModels : await loadAllModels();
+  const sel = document.getElementById('r-model');
+  sel.innerHTML = '<option value="">Global default</option>' + mods.map(m => `<option value="${m.id}">${m._endpoint_name} / ${m.model_name}</option>`).join('');
+  if (!id) { ['r-pid','r-name','r-url','r-token','r-secret'].forEach(f => document.getElementById(f).value=''); document.getElementById('r-commits').value='true'; document.getElementById('r-mrs').value='true'; }
+  document.getElementById('modal-repo').classList.remove('hidden');
+}
+
+async function editRepo(id) {
+  const r = allRepos.find(r => r.id === id);
+  await openRepoModal(id);
+  document.getElementById('r-pid').value = r.gitlab_project_id;
+  document.getElementById('r-name').value = r.name;
+  document.getElementById('r-url').value = r.gitlab_url;
+  document.getElementById('r-token').value = '';
+  document.getElementById('r-secret').value = '';
+  document.getElementById('r-model').value = r.llm_model_id || '';
+  document.getElementById('r-commits').value = String(r.review_commits);
+  document.getElementById('r-mrs').value = String(r.review_mrs);
+}
+
+async function saveRepo() {
+  const errEl = document.getElementById('repo-error');
+  errEl.classList.add('hidden');
+  const body = {
+    gitlab_project_id: parseInt(document.getElementById('r-pid').value),
+    name: document.getElementById('r-name').value,
+    gitlab_url: document.getElementById('r-url').value,
+    review_commits: document.getElementById('r-commits').value === 'true',
+    review_mrs: document.getElementById('r-mrs').value === 'true',
+  };
+  const tok = document.getElementById('r-token').value;
+  const sec = document.getElementById('r-secret').value;
+  const mid = document.getElementById('r-model').value;
+  if (tok) body.gitlab_token = tok;
+  if (sec) body.webhook_secret = sec;
+  if (mid) body.llm_model_id = mid;
+  if (!editingId) { if (!tok) { errEl.textContent='GitLab token required'; errEl.classList.remove('hidden'); return; } body.gitlab_token=tok; if (!sec) { errEl.textContent='Webhook secret required'; errEl.classList.remove('hidden'); return; } body.webhook_secret=sec; }
+  try {
+    if (editingId) await api('PUT', `/repositories/${editingId}`, body);
+    else await api('POST', '/repositories', body);
+    closeModal('modal-repo');
+    loadRepos();
+  } catch(e) { errEl.textContent = e.message; errEl.classList.remove('hidden'); }
+}
+
+async function deleteRepo(id) {
+  if (!confirm('Delete this repository?')) return;
+  await api('DELETE', `/repositories/${id}`);
+  loadRepos();
+}
+
+// ── Users ──────────────────────────────────────────────────────────────────────
+let allUsers = [];
+async function loadUsers() {
+  allUsers = await api('GET', '/users') || [];
+  document.getElementById('users-body').innerHTML = allUsers.map(u => `
+    <tr>
+      <td>${u.username}</td>
+      <td>${u.email}</td>
+      <td><span class="badge badge-${u.role}">${u.role}</span></td>
+      <td><span class="badge badge-${u.is_active ? 'active' : 'inactive'}">${u.is_active ? 'Active' : 'Inactive'}</span></td>
+      <td>
+        <button class="btn btn-sm btn-secondary" onclick="editUser('${u.id}')">Edit</button>
+        <button class="btn btn-sm btn-danger" onclick="deleteUser('${u.id}')">Deactivate</button>
+      </td>
+    </tr>
+  `).join('');
+}
+
+function openUserModal(id) {
+  editingId = id || null;
+  document.getElementById('user-modal-title').textContent = id ? 'Edit User' : 'Add User';
+  document.getElementById('user-error').classList.add('hidden');
+  if (!id) { document.getElementById('u-username').value=''; document.getElementById('u-email').value=''; document.getElementById('u-pass').value=''; document.getElementById('u-role').value='viewer'; }
+  document.getElementById('modal-user').classList.remove('hidden');
+}
+
+async function editUser(id) {
+  const u = allUsers.find(u => u.id === id);
+  openUserModal(id);
+  document.getElementById('u-username').value = u.username;
+  document.getElementById('u-email').value = u.email;
+  document.getElementById('u-pass').value = '';
+  document.getElementById('u-role').value = u.role;
+}
+
+async function saveUser() {
+  const errEl = document.getElementById('user-error');
+  errEl.classList.add('hidden');
+  try {
+    if (editingId) {
+      const body = { username: document.getElementById('u-username').value, email: document.getElementById('u-email').value, role: document.getElementById('u-role').value };
+      await api('PUT', `/users/${editingId}`, body);
+      const pass = document.getElementById('u-pass').value;
+      if (pass) await api('PUT', `/users/${editingId}/password`, { new_password: pass });
+    } else {
+      const body = { username: document.getElementById('u-username').value, email: document.getElementById('u-email').value, password: document.getElementById('u-pass').value, role: document.getElementById('u-role').value };
+      await api('POST', '/users', body);
+    }
+    closeModal('modal-user');
+    loadUsers();
+  } catch(e) { errEl.textContent = e.message; errEl.classList.remove('hidden'); }
+}
+
+async function deleteUser(id) {
+  if (!confirm('Deactivate this user?')) return;
+  await api('DELETE', `/users/${id}`);
+  loadUsers();
+}
+
+// ── Prompts ────────────────────────────────────────────────────────────────────
+let allPrompts = [];
+async function loadPrompts() {
+  allPrompts = await api('GET', '/prompts') || [];
+  document.getElementById('prompts-body').innerHTML = allPrompts.map(p => `
+    <tr>
+      <td>${p.name}</td>
+      <td>${p.prompt_type}</td>
+      <td>${p.user_id ? 'User' : 'Global'}</td>
+      <td>${p.is_default ? '<span class="badge badge-admin">Default</span>' : '—'}</td>
+      <td><span class="badge badge-${p.is_active ? 'active' : 'inactive'}">${p.is_active ? 'Active' : 'Inactive'}</span></td>
+      <td>
+        <button class="btn btn-sm btn-secondary" onclick="viewPrompt('${p.id}')">View</button>
+        <button class="btn btn-sm btn-secondary" onclick="editPrompt('${p.id}')">Edit</button>
+        ${currentUser.role === 'admin' && !p.user_id ? `<button class="btn btn-sm btn-secondary" onclick="setDefaultPrompt('${p.id}')">Set Default</button>` : ''}
+        <button class="btn btn-sm btn-danger" onclick="deletePrompt('${p.id}')">Delete</button>
+      </td>
+    </tr>
+  `).join('') || '<tr><td colspan="6" style="color:var(--text-muted);text-align:center">No prompts</td></tr>';
+}
+
+function openPromptModal(id) {
+  editingId = id || null;
+  document.getElementById('prompt-modal-title').textContent = id ? 'Edit Prompt' : 'Add Prompt';
+  document.getElementById('prompt-error').classList.add('hidden');
+  if (!id) { document.getElementById('p-name').value=''; document.getElementById('p-type').value='commit_review'; document.getElementById('p-content').value=''; document.getElementById('p-default').value='false'; }
+  document.getElementById('modal-prompt').classList.remove('hidden');
+}
+
+async function editPrompt(id) {
+  const p = allPrompts.find(p => p.id === id);
+  openPromptModal(id);
+  document.getElementById('p-name').value = p.name;
+  document.getElementById('p-type').value = p.prompt_type;
+  document.getElementById('p-content').value = p.content;
+  document.getElementById('p-default').value = String(p.is_default);
+}
+
+function viewPrompt(id) {
+  const p = allPrompts.find(p => p.id === id);
+  alert(`[${p.prompt_type}] ${p.name}\n\n${p.content}`);
+}
+
+async function savePrompt() {
+  const errEl = document.getElementById('prompt-error');
+  errEl.classList.add('hidden');
+  const body = { name: document.getElementById('p-name').value, prompt_type: document.getElementById('p-type').value, content: document.getElementById('p-content').value, is_default: document.getElementById('p-default').value === 'true' };
+  try {
+    if (editingId) await api('PUT', `/prompts/${editingId}`, body);
+    else await api('POST', '/prompts', body);
+    closeModal('modal-prompt');
+    loadPrompts();
+  } catch(e) { errEl.textContent = e.message; errEl.classList.remove('hidden'); }
+}
+
+async function deletePrompt(id) {
+  if (!confirm('Delete this prompt?')) return;
+  await api('DELETE', `/prompts/${id}`);
+  loadPrompts();
+}
+
+async function setDefaultPrompt(id) {
+  await api('POST', `/prompts/${id}/set-default`);
+  loadPrompts();
+}
+
+// ── Reviews ────────────────────────────────────────────────────────────────────
+async function loadReviews() {
+  const jobs = await api('GET', '/reviews') || [];
+  const repos = await api('GET', '/repositories') || [];
+  const repoMap = Object.fromEntries(repos.map(r => [r.id, r.name]));
+  document.getElementById('reviews-body').innerHTML = jobs.map(j => `
+    <tr>
+      <td><code>${j.id.slice(0,8)}</code></td>
+      <td>${repoMap[j.repository_id] || j.repository_id.slice(0,8)}</td>
+      <td>${j.trigger_type}</td>
+      <td><code>${j.commit_sha ? j.commit_sha.slice(0,8) : j.mr_iid ? '#'+j.mr_iid : '—'}</code></td>
+      <td><span class="badge badge-${j.status}">${j.status}</span></td>
+      <td>${fmtDate(j.created_at)}</td>
+      <td>
+        <button class="btn btn-sm btn-secondary" onclick="viewReview('${j.id}')">View</button>
+        ${j.status === 'failed' ? `<button class="btn btn-sm btn-secondary" onclick="retryReview('${j.id}')">Retry</button>` : ''}
+      </td>
+    </tr>
+  `).join('') || '<tr><td colspan="7" style="color:var(--text-muted);text-align:center">No reviews yet</td></tr>';
+}
+
+async function viewReview(id) {
+  const job = await api('GET', `/reviews/${id}`);
+  const comments = job.comments || [];
+  document.getElementById('review-detail-content').innerHTML = `
+    <table style="margin-bottom:16px;width:100%">
+      <tr><td style="color:var(--text-muted);width:140px">Status</td><td><span class="badge badge-${job.status}">${job.status}</span></td></tr>
+      <tr><td style="color:var(--text-muted)">Type</td><td>${job.trigger_type}</td></tr>
+      <tr><td style="color:var(--text-muted)">Ref</td><td><code>${job.commit_sha || '#'+job.mr_iid || '—'}</code></td></tr>
+      <tr><td style="color:var(--text-muted)">Created</td><td>${fmtDate(job.created_at)}</td></tr>
+      ${job.error_message ? `<tr><td style="color:var(--text-muted)">Error</td><td style="color:var(--danger)">${job.error_message}</td></tr>` : ''}
+    </table>
+    <h3 style="margin-bottom:12px">Comments (${comments.length})</h3>
+    ${comments.length === 0 ? '<p style="color:var(--text-muted)">No comments yet</p>' : comments.map(c => `
+      <div class="comment">
+        <div class="comment-header">
+          <span class="badge badge-${c.severity}">${c.severity}</span>
+          ${c.file_path ? `<code>${c.file_path}${c.line_number ? ':'+c.line_number : ''}</code>` : '<span>General</span>'}
+          ${c.posted_at ? '✅ Posted to GitLab' : '⏳ Not posted'}
+        </div>
+        <div class="comment-body">${escHtml(c.comment_body)}</div>
+      </div>
+    `).join('')}
+  `;
+  document.getElementById('modal-review-detail').classList.remove('hidden');
+}
+
+async function retryReview(id) {
+  await api('POST', `/reviews/${id}/retry`);
+  loadReviews();
+}
+
+async function openTriggerModal() {
+  document.getElementById('trigger-error').classList.add('hidden');
+  const repos = await api('GET', '/repositories') || [];
+  document.getElementById('tr-repo').innerHTML = repos.map(r => `<option value="${r.id}">${r.name}</option>`).join('');
+  document.getElementById('modal-trigger').classList.remove('hidden');
+}
+
+function updateTriggerFields() {
+  const type = document.getElementById('tr-type').value;
+  document.getElementById('tr-sha-group').classList.toggle('hidden', type !== 'commit');
+  document.getElementById('tr-mr-group').classList.toggle('hidden', type !== 'mr');
+}
+
+async function saveTrigger() {
+  const errEl = document.getElementById('trigger-error');
+  errEl.classList.add('hidden');
+  const body = {
+    repository_id: document.getElementById('tr-repo').value,
+    trigger_type: document.getElementById('tr-type').value,
+    commit_sha: document.getElementById('tr-sha').value || null,
+    mr_iid: parseInt(document.getElementById('tr-mr').value) || null,
+  };
+  try {
+    const job = await api('POST', '/reviews/trigger', body);
+    closeModal('modal-trigger');
+    showPage('reviews');
+  } catch(e) { errEl.textContent = e.message; errEl.classList.remove('hidden'); }
+}
+
+// ── Workers ────────────────────────────────────────────────────────────────────
+let _autoRefreshTimer = null;
+
+async function loadWorkers() {
+  document.getElementById('workers-last-refresh').textContent = 'Refreshing…';
+
+  const [status, queues] = await Promise.all([
+    api('GET', '/workers/status').catch(e => ({ workers: [], workers_online: 0, error: e.message })),
+    api('GET', '/workers/queues').catch(e => ({ queues: {}, error: e.message })),
+  ]);
+
+  document.getElementById('workers-last-refresh').textContent =
+    'Last refresh: ' + new Date().toLocaleTimeString();
+
+  // ── Queue depths ──────────────────────────────────────────────────────────
+  const queueEntries = Object.entries(queues.queues || {});
+  const maxQ = Math.max(1, ...queueEntries.map(([, v]) => v.pending));
+  document.getElementById('workers-queues').innerHTML = queueEntries.length === 0
+    ? '<div style="color:var(--text-muted);font-size:13px">No queue data available</div>'
+    : queueEntries.map(([name, info]) => {
+        const pct = Math.max(2, Math.round((info.pending / maxQ) * 100));
+        const color = info.pending === 0 ? 'var(--success)' : info.pending > 10 ? 'var(--danger)' : 'var(--warning)';
+        return `
+          <div class="queue-row">
+            <div class="queue-name">${name}</div>
+            <div class="queue-bar-bg"><div class="queue-bar" style="width:${pct}%;background:${color}"></div></div>
+            <div class="queue-count" style="color:${color}">${info.pending}</div>
+          </div>`;
+      }).join('');
+
+  // ── Worker cards ──────────────────────────────────────────────────────────
+  const workers = status.workers || [];
+  if (workers.length === 0) {
+    document.getElementById('workers-list').innerHTML = `
+      <div class="worker-card">
+        <div class="worker-header">
+          <span class="pulse offline"></span>
+          <span class="wname">No workers online</span>
+          <span class="badge badge-inactive">Offline</span>
+        </div>
+        <div style="padding:16px;color:var(--text-muted);font-size:13px">
+          ${status.error ? '⚠️ ' + status.error : 'No Celery workers responded within the timeout. Start a worker with: <code>celery -A app.workers.celery_app worker -Q reviews</code>'}
+        </div>
+      </div>`;
+    return;
+  }
+
+  document.getElementById('workers-list').innerHTML = workers.map(w => {
+    const activeTasks = w.active_tasks || [];
+    const reservedTasks = w.reserved_tasks || [];
+    const totalProcessed = Object.values(w.total_tasks || {}).reduce((a, b) => a + b, 0);
+    const processes = Array.isArray(w.processes) ? w.processes.length : w.concurrency;
+
+    return `
+      <div class="worker-card">
+        <div class="worker-header">
+          <span class="pulse"></span>
+          <span class="wname">${w.name}</span>
+          <span class="badge badge-active" style="margin-left:auto">Online</span>
+        </div>
+        <div class="worker-body">
+          <div class="worker-stat">
+            <div class="ws-label">Active Tasks</div>
+            <div class="ws-val" style="color:${activeTasks.length > 0 ? 'var(--accent)' : 'var(--text)'}">${activeTasks.length}</div>
+          </div>
+          <div class="worker-stat">
+            <div class="ws-label">Reserved</div>
+            <div class="ws-val">${reservedTasks.length}</div>
+          </div>
+          <div class="worker-stat">
+            <div class="ws-label">Concurrency</div>
+            <div class="ws-val">${processes || w.concurrency || '?'}</div>
+          </div>
+          <div class="worker-stat">
+            <div class="ws-label">Total Processed</div>
+            <div class="ws-val">${totalProcessed.toLocaleString()}</div>
+          </div>
+          <div class="worker-stat">
+            <div class="ws-label">Prefetch</div>
+            <div class="ws-val">${w.prefetch_count}</div>
+          </div>
+          <div class="worker-stat">
+            <div class="ws-label">Broker</div>
+            <div class="ws-val" style="font-size:14px">${w.broker_transport}</div>
+          </div>
+        </div>
+
+        ${activeTasks.length > 0 ? `
+        <div class="task-list">
+          <div style="font-size:12px;color:var(--text-muted);margin-bottom:8px;text-transform:uppercase;letter-spacing:.05em">Running</div>
+          ${activeTasks.map(t => `
+            <div class="task-item">
+              <div class="task-name">${t.name}</div>
+              <div class="task-meta">
+                ID: <code>${t.id.slice(0,12)}…</code>
+                ${t.args && t.args.length ? ' · Args: ' + escHtml(JSON.stringify(t.args).slice(0,60)) : ''}
+                ${t.time_start ? ' · Running for ' + Math.round(Date.now()/1000 - t.time_start) + 's' : ''}
+                ${t.worker_pid ? ' · PID ' + t.worker_pid : ''}
+              </div>
+            </div>
+          `).join('')}
+        </div>` : ''}
+
+        ${reservedTasks.length > 0 ? `
+        <div class="task-list" style="padding-top:0">
+          <div style="font-size:12px;color:var(--text-muted);margin-bottom:8px;text-transform:uppercase;letter-spacing:.05em">Queued (reserved)</div>
+          ${reservedTasks.map(t => `
+            <div class="task-item" style="opacity:.7">
+              <div class="task-name">${t.name}</div>
+              <div class="task-meta">ID: <code>${t.id.slice(0,12)}…</code></div>
+            </div>
+          `).join('')}
+        </div>` : ''}
+      </div>`;
+  }).join('');
+}
+
+function toggleAutoRefresh() {
+  const btn = document.getElementById('workers-auto-btn');
+  if (_autoRefreshTimer) {
+    clearInterval(_autoRefreshTimer);
+    _autoRefreshTimer = null;
+    btn.textContent = 'Auto-refresh: OFF';
+    btn.classList.remove('btn-primary');
+    btn.classList.add('btn-secondary');
+  } else {
+    loadWorkers();
+    _autoRefreshTimer = setInterval(loadWorkers, 5000);
+    btn.textContent = 'Auto-refresh: ON (5s)';
+    btn.classList.remove('btn-secondary');
+    btn.classList.add('btn-primary');
+  }
+}
+
+// Stop auto-refresh when leaving the workers page
+const _origShowPage = showPage;
+function showPage(name) {
+  if (name !== 'workers' && _autoRefreshTimer) {
+    clearInterval(_autoRefreshTimer);
+    _autoRefreshTimer = null;
+    const btn = document.getElementById('workers-auto-btn');
+    if (btn) { btn.textContent = 'Auto-refresh: OFF'; btn.classList.remove('btn-primary'); btn.classList.add('btn-secondary'); }
+  }
+  _origShowPage(name);
+}
+
+// ── Utilities ──────────────────────────────────────────────────────────────────
+function closeModal(id) { document.getElementById(id).classList.add('hidden'); editingId = null; }
+function fmtDate(d) { return d ? new Date(d).toLocaleString() : '—'; }
+function escHtml(s) { return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+
+// Keyboard: Escape closes modals
+document.addEventListener('keydown', e => {
+  if (e.key === 'Escape') document.querySelectorAll('.modal-overlay:not(.hidden)').forEach(m => m.classList.add('hidden'));
+});
+
+// Click outside modal to close
+document.querySelectorAll('.modal-overlay').forEach(overlay => {
+  overlay.addEventListener('click', e => { if (e.target === overlay) overlay.classList.add('hidden'); });
+});
+
+// Login on Enter
+document.addEventListener('keypress', e => {
+  if (e.key === 'Enter' && !document.getElementById('login-page').classList.contains('hidden')) doLogin();
+});
+
+// ── Boot ───────────────────────────────────────────────────────────────────────
+if (token) {
+  initApp().catch(() => doLogout());
+} else {
+  document.getElementById('login-page').classList.remove('hidden');
+}
+</script>
+</body>
+</html>
