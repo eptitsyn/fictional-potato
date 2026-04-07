@@ -179,14 +179,18 @@ class GitLabDiffPositionResolver:
                 old_cursor += 1
                 continue
 
-            position = DiffLinePosition(
+            by_old_line[old_cursor] = DiffLinePosition(
                 old_line=old_cursor,
                 new_line=new_cursor,
                 line_code=line_code,
                 range_type="old",
             )
-            by_old_line[old_cursor] = position
-            by_new_line[new_cursor] = position
+            by_new_line[new_cursor] = DiffLinePosition(
+                old_line=old_cursor,
+                new_line=new_cursor,
+                line_code=line_code,
+                range_type="new",
+            )
             old_cursor += 1
             new_cursor += 1
 

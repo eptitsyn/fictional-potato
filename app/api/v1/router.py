@@ -6,6 +6,7 @@ from app.api.v1 import (
     llm_endpoints,
     prompts,
     repositories,
+    request_logs,
     reviews,
     users,
     webhooks,
@@ -24,3 +25,4 @@ api_router.include_router(prompts.router)
 api_router.include_router(reviews.router)
 api_router.include_router(webhooks.router)
 api_router.include_router(workers.router)
+api_router.include_router(request_logs.router)

@@ -1,18 +1,57 @@
 import logging
 from contextlib import asynccontextmanager
+from pathlib import Path
+from typing import Callable
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
-from fastapi.staticfiles import StaticFiles
-from pathlib import Path
+from starlette.middleware.base import BaseHTTPMiddleware
 
 from app.api.v1.router import api_router
 from app.config import settings
 from app.core.database import AsyncSessionLocal
+from app.models.request_log import RequestLog
 from app.services.auth_service import bootstrap_admin
 
 logger = logging.getLogger(__name__)
+
+_SKIP_LOG_PATHS = {"/health", "/"}
+
+
+class RequestLoggingMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: Request, call_next: Callable) -> Response:
+        response = await call_next(request)
+
+        path = request.url.path
+        if path in _SKIP_LOG_PATHS or not path.startswith("/api/"):
+            return response
+
+        forwarded_for = request.headers.get("X-Forwarded-For", "")
+        ip = (
+            forwarded_for.split(",")[0].strip()
+            or request.headers.get("X-Real-IP")
+            or (request.client.host if request.client else None)
+        )
+
+        user_id = getattr(request.state, "user_id", None)
+        username = getattr(request.state, "username", None)
+
+        try:
+            async with AsyncSessionLocal() as db:
+                db.add(RequestLog(
+                    user_id=user_id,
+                    username=username,
+                    ip_address=ip,
+                    method=request.method,
+                    path=path,
+                    status_code=response.status_code,
+                ))
+                await db.commit()
+        except Exception:
+            logger.exception("Failed to write request log")
+
+        return response
 
 
 @asynccontextmanager
@@ -31,10 +70,13 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="AI Code Reviewer",
     version="1.0.0",
-    description="AI-powered GitLab code reviewer with configurable LLM backends",
+    description=(
+        "AI-powered GitLab code reviewer with configurable LLM backends"
+    ),
     lifespan=lifespan,
 )
 
+app.add_middleware(RequestLoggingMiddleware)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
