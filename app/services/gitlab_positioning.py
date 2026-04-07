@@ -104,15 +104,10 @@ class GitLabDiffPositionResolver:
 
     @staticmethod
     def _serialize_range_endpoint(position: DiffLinePosition) -> dict:
-        payload = {
+        return {
             "line_code": position.line_code,
             "type": position.range_type,
         }
-        if position.old_line is not None:
-            payload["old_line"] = position.old_line
-        if position.new_line is not None:
-            payload["new_line"] = position.new_line
-        return payload
 
     @classmethod
     def _parse_changes(cls, changes: list[dict]) -> dict[str, list[DiffFile]]:

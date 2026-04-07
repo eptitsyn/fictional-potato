@@ -121,9 +121,23 @@ async def _execute_review(job_id: uuid.UUID) -> dict:
             logger.error("ReviewJob %s not found", job_id)
             return {"status": "error", "detail": "Job not found"}
 
+        from app.services.event_log_service import log_event
+
         repo = job.repository
         job.status = "running"
         job.started_at = datetime.now(UTC)
+        await log_event(
+            db, "review.started",
+            f"Review job started for '{repo.name}'",
+            user_id=job.triggered_by_id,
+            details={
+                "job_id": str(job_id),
+                "repository": repo.name,
+                "trigger_type": job.trigger_type,
+                "commit_sha": job.commit_sha,
+                "mr_iid": job.mr_iid,
+            },
+        )
         await db.commit()
 
         try:
@@ -212,6 +226,8 @@ async def _execute_review(job_id: uuid.UUID) -> dict:
                 review_prompt=review_prompt,
                 model=model,
                 api_key=api_key,
+                job_id=str(job_id),
+                triggered_by_id=str(job.triggered_by_id) if job.triggered_by_id else None,
             )
 
             # Persist + post each comment
@@ -270,7 +286,37 @@ async def _execute_review(job_id: uuid.UUID) -> dict:
                         )
                     comment.gitlab_note_id = _extract_gitlab_note_id(resp)
                     comment.posted_at = now
+                    await log_event(
+                        db, "gitlab.comment_posted",
+                        f"Comment posted to GitLab for job {job.id}",
+                        user_id=job.triggered_by_id,
+                        details={
+                            "job_id": str(job.id),
+                            "repository": repo.name,
+                            "trigger_type": job.trigger_type,
+                            "file_path": c.get("file_path"),
+                            "line_number": line_number,
+                            "line_end": line_end,
+                            "severity": c.get("severity"),
+                            "gitlab_note_id": comment.gitlab_note_id,
+                        },
+                    )
                 except Exception as post_err:
+                    await log_event(
+                        db, "gitlab.comment_failed",
+                        f"Failed to post comment to GitLab: {post_err}",
+                        level="warning",
+                        user_id=job.triggered_by_id,
+                        details={
+                            "job_id": str(job.id),
+                            "repository": repo.name,
+                            "trigger_type": job.trigger_type,
+                            "file_path": c.get("file_path"),
+                            "line_number": line_number,
+                            "line_end": line_end,
+                            "error": str(post_err),
+                        },
+                    )
                     logger.warning(
                         "Failed to post comment to GitLab: %s | job_id=%s comment_id=%s "
                         "trigger_type=%s file_path=%s line_number=%s line_end=%s "
@@ -288,6 +334,20 @@ async def _execute_review(job_id: uuid.UUID) -> dict:
 
             job.status = "completed"
             job.completed_at = datetime.now(UTC)
+            await log_event(
+                db, "review.completed",
+                f"Review job completed for '{repo.name}' — {len(comments_data)} comment(s)",
+                user_id=job.triggered_by_id,
+                details={
+                    "job_id": str(job_id),
+                    "repository": repo.name,
+                    "trigger_type": job.trigger_type,
+                    "commit_sha": job.commit_sha,
+                    "mr_iid": job.mr_iid,
+                    "comments_count": len(comments_data),
+                    "model": model.model_name,
+                },
+            )
             await db.commit()
 
             logger.info(
@@ -302,6 +362,18 @@ async def _execute_review(job_id: uuid.UUID) -> dict:
             job.status = "failed"
             job.error_message = str(exc)[:2000]
             job.completed_at = datetime.now(UTC)
+            await log_event(
+                db, "review.failed",
+                f"Review job failed for '{repo.name}': {exc}",
+                level="error",
+                user_id=job.triggered_by_id,
+                details={
+                    "job_id": str(job_id),
+                    "repository": repo.name,
+                    "trigger_type": job.trigger_type,
+                    "error": str(exc)[:500],
+                },
+            )
             await db.commit()
             return {"status": "failed", "detail": str(exc)}
 

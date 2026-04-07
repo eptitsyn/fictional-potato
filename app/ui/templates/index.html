@@ -320,8 +320,32 @@
       <!-- LOGS -->
       <div id="page-logs" class="page">
         <div class="toolbar">
-          <h2>Request Logs</h2>
-          <div style="display:flex;align-items:center;gap:12px">
+          <h2>Activity Logs</h2>
+          <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+            <select id="logs-filter-level" onchange="loadLogs()" style="width:auto;padding:6px 10px;font-size:12px">
+              <option value="">All levels</option>
+              <option value="info">Info</option>
+              <option value="warning">Warning</option>
+              <option value="error">Error</option>
+            </select>
+            <select id="logs-filter-type" onchange="loadLogs()" style="width:auto;padding:6px 10px;font-size:12px">
+              <option value="">All events</option>
+              <option value="auth.login.success">auth.login.success</option>
+              <option value="auth.login.failed">auth.login.failed</option>
+              <option value="auth.logout">auth.logout</option>
+              <option value="review.started">review.started</option>
+              <option value="review.completed">review.completed</option>
+              <option value="review.failed">review.failed</option>
+              <option value="llm.call">llm.call</option>
+              <option value="llm.response">llm.response</option>
+              <option value="llm.fallback">llm.fallback</option>
+              <option value="llm.review_started">llm.review_started</option>
+              <option value="llm.review_completed">llm.review_completed</option>
+              <option value="gitlab.webhook_received">gitlab.webhook_received</option>
+              <option value="gitlab.webhook_invalid_token">gitlab.webhook_invalid_token</option>
+              <option value="gitlab.comment_posted">gitlab.comment_posted</option>
+              <option value="gitlab.comment_failed">gitlab.comment_failed</option>
+            </select>
             <span id="logs-last-refresh" style="font-size:12px;color:var(--text-muted)"></span>
             <button class="btn btn-secondary refresh-btn" onclick="loadLogs()">↻ Refresh</button>
             <button class="btn btn-secondary refresh-btn" id="logs-live-btn" onclick="toggleLogsLive()">Live: OFF</button>
@@ -329,7 +353,7 @@
         </div>
         <div class="table-wrap">
           <table>
-            <thead><tr><th>Time</th><th>User</th><th>IP</th><th>Method</th><th>Path</th><th>Status</th></tr></thead>
+            <thead><tr><th>Time</th><th>Level</th><th>Event</th><th>User</th><th>IP</th><th>Message</th><th>Details</th></tr></thead>
             <tbody id="logs-body"></tbody>
           </table>
         </div>
@@ -732,7 +756,7 @@ async function initApp() {
 const pageTitles = {
   dashboard: 'Dashboard', endpoints: 'LLM Endpoints', models: 'LLM Models',
   'git-servers': 'Git Servers', repositories: 'Repositories', users: 'Users', prompts: 'Prompts', reviews: 'Review Jobs',
-  workers: 'Worker Status', logs: 'Request Logs',
+  workers: 'Worker Status', logs: 'Activity Logs',
 };
 
 function renderPage(name) {
@@ -1683,24 +1707,45 @@ function showPage(name) {
   renderPage(name);
 }
 
-// ── Request Logs ──────────────────────────────────────────────────────────────
+// ── Activity Logs ─────────────────────────────────────────────────────────────
 let _logsLiveTimer = null;
 
+const _logLevelClass = { info: 'info', warning: 'warning', error: 'failed' };
+const _logTypeColor = {
+  'auth.login.success': 'var(--success)', 'auth.login.failed': 'var(--danger)',
+  'auth.logout': 'var(--text-muted)',
+  'review.started': 'var(--accent)', 'review.completed': 'var(--success)', 'review.failed': 'var(--danger)',
+  'llm.call': '#a78bfa', 'llm.response': '#c4b5fd', 'llm.fallback': 'var(--warning)',
+  'llm.review_started': '#a78bfa', 'llm.review_completed': '#c4b5fd',
+  'gitlab.webhook_received': 'var(--accent)', 'gitlab.webhook_invalid_token': 'var(--danger)',
+  'gitlab.comment_posted': 'var(--success)', 'gitlab.comment_failed': 'var(--warning)',
+};
+
 async function loadLogs() {
-  const logs = await api('GET', '/request-logs?limit=200').catch(() => []);
+  const level = document.getElementById('logs-filter-level').value;
+  const type = document.getElementById('logs-filter-type').value;
+  let path = '/event-logs?limit=200';
+  if (level) path += '&level=' + encodeURIComponent(level);
+  if (type) path += '&event_type=' + encodeURIComponent(type);
+
+  const logs = await api('GET', path).catch(() => []);
   const tbody = document.getElementById('logs-body');
   tbody.innerHTML = (logs || []).map(l => {
-    const statusClass = l.status_code < 300 ? 'completed' : l.status_code < 500 ? 'warning' : 'failed';
-    const methodColor = l.method === 'GET' ? 'var(--accent)' : l.method === 'POST' ? 'var(--success)' : l.method === 'DELETE' ? 'var(--danger)' : 'var(--text-muted)';
+    const typeColor = _logTypeColor[l.event_type] || 'var(--text-muted)';
+    const levelCls = _logLevelClass[l.level] || 'info';
+    const detailsHtml = l.details
+      ? `<details><summary style="cursor:pointer;font-size:11px;color:var(--text-muted)">details</summary><pre style="font-size:11px;margin-top:4px;white-space:pre-wrap;word-break:break-all;color:var(--text-muted)">${escHtml(JSON.stringify(l.details, null, 2))}</pre></details>`
+      : '—';
     return `<tr>
-      <td style="white-space:nowrap">${fmtDate(l.timestamp)}</td>
-      <td>${l.username ? escHtml(l.username) : '<span style="color:var(--text-muted)">—</span>'}</td>
-      <td><code>${l.ip_address || '—'}</code></td>
-      <td><code style="color:${methodColor}">${l.method}</code></td>
-      <td><code style="word-break:break-all">${escHtml(l.path)}</code></td>
-      <td><span class="badge badge-${statusClass}">${l.status_code}</span></td>
+      <td style="white-space:nowrap;font-size:12px">${fmtDate(l.timestamp)}</td>
+      <td><span class="badge badge-${levelCls}">${l.level}</span></td>
+      <td><code style="font-size:11px;color:${typeColor}">${escHtml(l.event_type)}</code></td>
+      <td style="font-size:12px">${l.username ? escHtml(l.username) : '<span style="color:var(--text-muted)">—</span>'}</td>
+      <td><code style="font-size:11px">${l.ip_address || '—'}</code></td>
+      <td style="font-size:13px">${escHtml(l.message)}</td>
+      <td style="font-size:12px;max-width:220px">${detailsHtml}</td>
     </tr>`;
-  }).join('') || '<tr><td colspan="6" style="color:var(--text-muted);text-align:center;padding:20px">No logs yet</td></tr>';
+  }).join('') || '<tr><td colspan="7" style="color:var(--text-muted);text-align:center;padding:20px">No logs yet</td></tr>';
   document.getElementById('logs-last-refresh').textContent = 'Updated: ' + new Date().toLocaleTimeString();
 }
 

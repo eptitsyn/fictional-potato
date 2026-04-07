@@ -98,6 +98,8 @@ async def run_review_graph(
     review_prompt: Prompt,
     model: LLMModel,
     api_key: str | None,
+    job_id: str | None = None,
+    triggered_by_id: str | None = None,
 ) -> list[dict]:
     """
     Run the multi-step LangGraph review pipeline.
@@ -199,11 +201,25 @@ async def run_review_graph(
         ),
     )
 
+    from app.services.event_log_service import log_event
+
     # Chunk diff to the smallest graph-stage budget.
     chunks = _chunk_diff(diff, graph_chunk_budget)
     all_comments: list[dict] = []
+    _log_details_base = {
+        "job_id": job_id,
+        "model": model.model_name,
+        "diff_chars": len(diff),
+        "chunks": len(chunks),
+    }
 
-    for chunk in chunks:
+    await log_event(
+        None, "llm.review_started",
+        f"LangGraph review started — model '{model.model_name}', {len(chunks)} chunk(s)",
+        details=_log_details_base,
+    )
+
+    for chunk_idx, chunk in enumerate(chunks):
         state = ReviewState(
             diff=chunk,
             metadata=metadata,
@@ -215,6 +231,11 @@ async def run_review_graph(
         )
 
         try:
+            await log_event(
+                None, "llm.call",
+                f"LangGraph pipeline — chunk {chunk_idx + 1}/{len(chunks)} (plan→security→quality→consolidate)",
+                details={**_log_details_base, "chunk": chunk_idx + 1, "chunk_chars": len(chunk)},
+            )
             comments = await _run_graph(
                 llm,
                 chain,
@@ -226,10 +247,20 @@ async def run_review_graph(
                 plan_context_tokens,
                 graph_response_tokens,
             )
+            await log_event(
+                None, "llm.response",
+                f"LangGraph chunk {chunk_idx + 1}/{len(chunks)} complete — {len(comments)} comment(s)",
+                details={**_log_details_base, "chunk": chunk_idx + 1, "comments": len(comments)},
+            )
             all_comments.extend(comments)
         except Exception as e:
             logger.warning("LangGraph review failed, falling back to single-shot: %s", e)
-            # Fallback: single LLM call
+            await log_event(
+                None, "llm.fallback",
+                f"LangGraph failed on chunk {chunk_idx + 1}, using single-shot fallback: {e}",
+                level="warning",
+                details={**_log_details_base, "chunk": chunk_idx + 1, "error": str(e)},
+            )
             from app.langchain_integration.chains import run_review_chain
             fallback = await run_review_chain(
                 diff=chunk,
@@ -241,6 +272,11 @@ async def run_review_graph(
             )
             all_comments.extend(fallback)
 
+    await log_event(
+        None, "llm.review_completed",
+        f"LangGraph review done — {len(all_comments)} total comment(s)",
+        details={**_log_details_base, "total_comments": len(all_comments)},
+    )
     return all_comments
 
 

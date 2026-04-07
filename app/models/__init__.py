@@ -1,3 +1,4 @@
+from app.models.event_log import EventLog
 from app.models.git_server import GitServer
 from app.models.llm import LLMEndpoint, LLMModel
 from app.models.prompt import Prompt
@@ -16,4 +17,5 @@ __all__ = [
     "ReviewJob",
     "ReviewComment",
     "RequestLog",
+    "EventLog",
 ]

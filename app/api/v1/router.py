@@ -2,6 +2,7 @@ from fastapi import APIRouter
 
 from app.api.v1 import (
     auth,
+    event_logs,
     git_servers,
     llm_endpoints,
     prompts,
@@ -26,3 +27,4 @@ api_router.include_router(reviews.router)
 api_router.include_router(webhooks.router)
 api_router.include_router(workers.router)
 api_router.include_router(request_logs.router)
+api_router.include_router(event_logs.router)
