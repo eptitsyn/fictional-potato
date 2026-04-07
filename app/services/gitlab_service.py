@@ -182,6 +182,46 @@ class GitLabClient:
         )
         return data if isinstance(data, dict) else {}
 
+    # ── Repository Files ────────────────────────────────────────────────────
+
+    async def get_file_content(
+        self, project_id: int, file_path: str, ref: str
+    ) -> str:
+        """Return decoded file content from the repository."""
+        import base64
+        import urllib.parse
+
+        encoded_path = urllib.parse.quote(file_path, safe="")
+        data = await self._get(
+            f"/projects/{project_id}/repository/files/{encoded_path}",
+            params={"ref": ref},
+        )
+        content = data.get("content", "")
+        encoding = data.get("encoding", "base64")
+        if encoding == "base64":
+            return base64.b64decode(content).decode("utf-8", errors="replace")
+        return content
+
+    async def list_repository_tree(
+        self,
+        project_id: int,
+        path: str = "",
+        ref: str = "HEAD",
+        recursive: bool = False,
+    ) -> list[dict]:
+        """List files/directories at the given path."""
+        params: dict = {"ref": ref}
+        if path:
+            params["path"] = path
+        if recursive:
+            params["recursive"] = "true"
+        return await self._list_paginated(
+            f"/projects/{project_id}/repository/tree",
+            params=params,
+        )
+
+    # ── Merge Request ───────────────────────────────────────────────────────
+
     async def list_mr_discussions(self, project_id: int, mr_iid: int) -> list[dict]:
         return await self._list_paginated(
             f"/projects/{project_id}/merge_requests/{mr_iid}/discussions"

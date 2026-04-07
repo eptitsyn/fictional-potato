@@ -1,35 +1,57 @@
 """
-LangGraph-based code review agent.
+Agentic code review pipeline — ReAct pattern.
 
-Graph flow:
-  START
-   │
-   ▼
- plan_review          ← Analyze diff, identify files and concern areas
-   │
-   ▼
- security_review      ← Run security-focused sub-review
-   │
-   ▼
- quality_review       ← Run code quality / style sub-review
-   │
-   ▼
- consolidate          ← Merge + deduplicate + prioritize all comments
-   │
-   ▼
-  END  →  list[dict]
+Architecture
+────────────
+                 ┌──────────────────────────────┐
+                 │      OrchestratorAgent        │
+                 │  • Plans overall review scope │
+                 │  • Dispatches sub-agents      │
+                 └───────────┬──────────────────┘
+                             │  concurrently
+              ┌──────────────┴──────────────┐
+              ▼                             ▼
+  ┌──────────────────────┐   ┌──────────────────────┐
+  │   SecurityAgent      │   │    QualityAgent       │
+  │  Goal: OWASP/auth    │   │  Goal: bugs/perf      │
+  │  ┌─────────────────┐ │   │  ┌─────────────────┐ │
+  │  │ 1. PLAN         │ │   │  │ 1. PLAN         │ │
+  │  │ 2. ACT (tools)  │ │   │  │ 2. ACT (tools)  │ │
+  │  │ 3. REFLECT      │ │   │  │ 3. REFLECT      │ │
+  │  │ 4. → repeat     │ │   │  │ 4. → repeat     │ │
+  │  │    until done   │ │   │  │    until done   │ │
+  │  └─────────────────┘ │   │  └─────────────────┘ │
+  │  Tools:              │   │  Tools:              │
+  │    get_file_content  │   │    get_file_content  │
+  │    list_directory    │   │    list_directory    │
+  └──────────────────────┘   └──────────────────────┘
+              │                             │
+              └──────────────┬──────────────┘
+                             ▼
+                 ┌──────────────────────────┐
+                 │    ConsolidatorAgent     │
+                 │  Deduplicates + ranks   │
+                 └──────────────────────────┘
 
-Each node is an LLM call. State is a TypedDict passed through the graph.
+Each sub-agent follows the ReAct loop:
+  PLAN  →  (ACT → OBSERVE → REFLECT) × N  →  ANSWER
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
-from typing import TypedDict
+from typing import TYPE_CHECKING
 
-from langchain_core.messages import HumanMessage, SystemMessage
-from langchain_core.output_parsers import StrOutputParser
-from langchain_openai import ChatOpenAI
+from langchain_core.messages import (  # type: ignore[import]
+    AIMessage,
+    HumanMessage,
+    SystemMessage,
+    ToolMessage,
+)
+from langchain_core.output_parsers import (  # type: ignore[import]
+    StrOutputParser,
+)
 
 from app.core.exceptions import LLMServiceError
 from app.langchain_integration.chains import (
@@ -48,7 +70,14 @@ from app.langchain_integration.chains import (
 from app.models.llm import LLMModel
 from app.models.prompt import Prompt
 
+if TYPE_CHECKING:
+    from langchain_openai import ChatOpenAI  # type: ignore[import]
+
+    from app.services.gitlab_service import GitLabClient
+
 logger = logging.getLogger(__name__)
+
+# ── Token budgets ────────────────────────────────────────────────────────────
 
 _GRAPH_RESPONSE_RATIO = 0.14
 _MIN_GRAPH_RESPONSE_TOKENS = 192
@@ -56,40 +85,398 @@ _MAX_GRAPH_RESPONSE_TOKENS = 1536
 _PLAN_CONTEXT_RATIO = 0.10
 _MIN_PLAN_CONTEXT_TOKENS = 128
 _MAX_PLAN_CONTEXT_TOKENS = 1024
+
+# ── Agent loop limits ────────────────────────────────────────────────────────
+
+_MAX_TOOL_ITERATIONS = 8
+
+# ── Shared prompt fragments ──────────────────────────────────────────────────
+
 _LINE_RANGE_GUIDANCE = (
-    "Если замечание относится к нескольким соседним строкам одного непрерывного блока, "
-    "верни весь диапазон: start_line — первая строка, end_line — последняя. "
-    "Не своди такие замечания к одной строке."
+    "Если замечание относится к нескольким соседним строкам одного "
+    "непрерывного блока, верни весь диапазон: start_line — первая строка, "
+    "end_line — последняя. Не своди такие замечания к одной строке."
+)
+
+_COMMENT_SCHEMA = (
+    '{"file_path": str|null, "start_line": int|null, '
+    '"end_line": int|null, '
+    '"severity": "info"|"warning"|"error", "comment": str}'
 )
 
 
-class ReviewState(TypedDict):
-    diff: str
-    metadata: dict
-    system_prompt: str
-    # Per-agent outputs
-    plan: str
-    security_comments: list[dict]
-    quality_comments: list[dict]
-    final_comments: list[dict]
+# ── ReAct agent loop ─────────────────────────────────────────────────────────
+
+def _reflect_prompt(step: int, max_steps: int) -> str:
+    """
+    Prompt injected after each tool-call round so the agent can decide
+    whether to continue gathering context or finalize its findings.
+    """
+    return (
+        f"[Шаг {step}/{max_steps}] "
+        "Оцени накопленные данные: достаточно ли контекста для качественных "
+        "замечаний?\n"
+        "• Если нет — продолжай вызывать инструменты.\n"
+        "• Если да — верни финальный JSON-массив замечаний "
+        "(без дополнительных вызовов инструментов).\n"
+        f"Каждый элемент: {_COMMENT_SCHEMA}"
+    )
 
 
-def _make_node(llm: ChatOpenAI, system: str, human_template: str):
-    """Factory that returns a LangGraph node callable."""
+async def _run_agent(
+    llm: "ChatOpenAI",
+    tools: list,
+    system_message: str,
+    goal: str,
+    task_prompt: str,
+    *,
+    max_iterations: int = _MAX_TOOL_ITERATIONS,
+) -> str:
+    """
+    ReAct-style agent loop with planning, memory, and self-reflection.
+
+    Phases
+    ──────
+    1. PLAN   — LLM produces an explicit plan (no tool calls).
+    2. ACT    — LLM calls tools to gather context.
+    3. OBSERVE — Tool results are appended to message history (= memory).
+    4. REFLECT — LLM decides whether findings are complete.
+    5. Repeat ACT→OBSERVE→REFLECT until the agent stops calling tools
+       or *max_iterations* is reached.
+    6. ANSWER  — Final text response is extracted.
+
+    The full message history is passed on every invocation, so the agent
+    retains complete memory of everything it has observed so far.
+    """
     parser = StrOutputParser()
-    chain = llm | parser
+    tool_map = {t.name: t for t in tools}
 
-    async def node(state: ReviewState) -> dict:
-        try:
-            human = human_template.format(**state)
-        except KeyError:
-            human = human_template
+    # ── Phase 1: PLAN ────────────────────────────────────────────────────────
+    plan_system = (
+        f"{system_message}\n\n"
+        f"Твоя задача (цель): {goal}\n\n"
+        "На этом шаге только планируй — не вызывай инструменты и не давай "
+        "финальный ответ."
+    )
+    plan_prompt = (
+        f"{task_prompt}\n\n"
+        "Составь детальный план:\n"
+        "1. Какие аспекты ты проверишь в первую очередь?\n"
+        "2. Какие файлы тебе понадобятся для полного контекста?\n"
+        "3. На что обратишь особое внимание?\n\n"
+        "Ответь только планом, без замечаний и без JSON."
+    )
+    plan_raw = await (llm | parser).ainvoke([
+        SystemMessage(content=plan_system),
+        HumanMessage(content=plan_prompt),
+    ])
+    logger.debug("Agent plan: %s", plan_raw[:300])
 
-        messages = [SystemMessage(content=system), HumanMessage(content=human)]
-        return await chain.ainvoke(messages)
+    # ── Build conversation with plan as memory seed ──────────────────────────
+    messages = [
+        SystemMessage(content=f"{system_message}\n\nТвоя задача: {goal}"),
+        HumanMessage(content=plan_prompt),
+        AIMessage(content=f"[Мой план]\n{plan_raw}"),
+        HumanMessage(
+            content=(
+                "Хорошо. Теперь выполни план. "
+                "Используй инструменты для получения файлов, которые нужны "
+                "для полного анализа. Когда будешь готов — верни JSON."
+            )
+        ),
+    ]
 
-    return node
+    if not tools:
+        # No tools — single-shot answer after planning
+        answer = await (llm | parser).ainvoke(messages)
+        return answer
 
+    llm_with_tools = llm.bind_tools(tools)
+
+    # ── Phases 2-4: ACT → OBSERVE → REFLECT loop ────────────────────────────
+    for iteration in range(max_iterations):
+        response: AIMessage = await llm_with_tools.ainvoke(messages)
+        messages.append(response)
+
+        tool_calls = getattr(response, "tool_calls", None) or []
+
+        if not tool_calls:
+            # Agent decided it has enough information
+            logger.debug(
+                "Agent finished after %d iteration(s)", iteration + 1
+            )
+            return response.content or ""
+
+        logger.debug(
+            "Agent tools (iter %d/%d): %s",
+            iteration + 1,
+            max_iterations,
+            [tc["name"] for tc in tool_calls],
+        )
+
+        # ── OBSERVE: execute tools, append results to memory ─────────────────
+        for tc in tool_calls:
+            tool_fn = tool_map.get(tc["name"])
+            if tool_fn is None:
+                result = f"[Инструмент '{tc['name']}' не найден]"
+            else:
+                try:
+                    result = await tool_fn.ainvoke(tc["args"])
+                except Exception as exc:
+                    logger.warning(
+                        "Tool %s raised: %s", tc["name"], exc
+                    )
+                    result = (
+                        f"[Ошибка инструмента '{tc['name']}': {exc}]"
+                    )
+            messages.append(
+                ToolMessage(
+                    content=str(result),
+                    tool_call_id=tc["id"],
+                )
+            )
+
+        # ── REFLECT: ask agent to assess completeness ────────────────────────
+        messages.append(
+            HumanMessage(
+                content=_reflect_prompt(iteration + 1, max_iterations)
+            )
+        )
+
+    # ── Max iterations reached — force a final answer ────────────────────────
+    logger.warning(
+        "Agent reached max_iterations=%d, forcing final answer", max_iterations
+    )
+    forced = await (llm | parser).ainvoke(
+        messages
+        + [
+            HumanMessage(
+                content=(
+                    "Достигнут лимит шагов. "
+                    "Верни финальный JSON-массив замечаний "
+                    "по собранным данным.\n"
+                    f"Каждый элемент: {_COMMENT_SCHEMA}"
+                )
+            )
+        ]
+    )
+    return forced
+
+
+# ── Orchestrator: planning node ──────────────────────────────────────────────
+
+async def _plan_review(
+    llm: "ChatOpenAI",
+    diff: str,
+    plan_context_tokens: int,
+) -> str:
+    """
+    Orchestrator planning node — summarises the diff and identifies
+    focus areas for sub-agents. No tools needed here.
+    """
+    prompt = (
+        "Проанализируй этот дифф и перечисли:\n"
+        "1. Какие файлы изменены и за что они отвечают\n"
+        "2. Главные 3-5 направления для ревью\n"
+        "   (безопасность, производительность, логика, стиль, тесты)\n"
+        "3. Явные тревожные сигналы\n\n"
+        f"Дифф:\n{diff}\n\n"
+        "Ответь кратким текстом на русском языке, не JSON."
+    )
+    plan = await (llm | StrOutputParser()).ainvoke([
+        SystemMessage(
+            content=(
+                "Ты ведущий инженер и планируешь код-ревью. "
+                "Отвечай только по-русски."
+            )
+        ),
+        HumanMessage(content=prompt),
+    ])
+    return _truncate_to_token_budget(plan, plan_context_tokens)
+
+
+# ── Sub-agents ───────────────────────────────────────────────────────────────
+
+async def _security_agent(
+    llm: "ChatOpenAI",
+    tools: list,
+    diff: str,
+    plan: str,
+    review_guidance: str,
+    system_text: str,
+) -> list[dict]:
+    """
+    Security sub-agent — ReAct loop focused on OWASP Top 10,
+    auth/authz, secrets, injections.
+    """
+    goal = (
+        "Найти все проблемы безопасности в предоставленном диффе: "
+        "инъекции (SQL/command/XSS), ошибки auth/authz, секреты в коде, "
+        "небезопасная десериализация, OWASP Top 10."
+    )
+    system = (
+        f"{system_text}\n\n"
+        "Ты — агент безопасности кода. Используй инструменты, чтобы получить "
+        "полный контекст подозрительных мест. "
+        "Финальный ответ — только JSON-массив."
+    )
+    task = (
+        f"Контекст плана ревью:\n{plan}\n\n"
+        f"Дополнительные инструкции:\n{review_guidance}\n\n"
+        f"Дифф:\n{diff}\n\n"
+        "Если видишь подозрительный вызов, импорт или логику — запроси "
+        "полный файл через get_file_content для точного анализа.\n\n"
+        f"Итоговый ответ: JSON-массив. Элемент: {_COMMENT_SCHEMA}\n"
+        f"Все comment только по-русски.\n{_LINE_RANGE_GUIDANCE}"
+    )
+    raw = await _run_agent(llm, tools, system, goal, task)
+    try:
+        return _extract_json(raw)
+    except LLMServiceError as exc:
+        _log_llm_parse_failure(stage="security_agent", output=raw, error=exc)
+        return []
+
+
+async def _quality_agent(
+    llm: "ChatOpenAI",
+    tools: list,
+    diff: str,
+    plan: str,
+    review_guidance: str,
+    system_text: str,
+) -> list[dict]:
+    """
+    Quality sub-agent — ReAct loop focused on bugs, performance,
+    maintainability, missing tests.
+    """
+    goal = (
+        "Найти все проблемы качества кода: баги, ошибки логики, "
+        "N+1 запросы, отсутствующая обработка ошибок, мёртвый код, "
+        "слабые тесты, проблемы дизайна API."
+    )
+    system = (
+        f"{system_text}\n\n"
+        "Ты — агент качества кода. Используй инструменты, чтобы проверить "
+        "связанные модули и полный контекст изменённых функций. "
+        "Финальный ответ — только JSON-массив."
+    )
+    task = (
+        f"Контекст плана ревью:\n{plan}\n\n"
+        f"Дополнительные инструкции:\n{review_guidance}\n\n"
+        f"Дифф:\n{diff}\n\n"
+        "Если видишь вызов, который может быть реализован неоптимально или "
+        "вызывать баги — запроси полный файл через get_file_content.\n\n"
+        f"Итоговый ответ: JSON-массив. Элемент: {_COMMENT_SCHEMA}\n"
+        f"Все comment только по-русски.\n{_LINE_RANGE_GUIDANCE}"
+    )
+    raw = await _run_agent(llm, tools, system, goal, task)
+    try:
+        return _extract_json(raw)
+    except LLMServiceError as exc:
+        _log_llm_parse_failure(stage="quality_agent", output=raw, error=exc)
+        return []
+
+
+# ── Consolidator ─────────────────────────────────────────────────────────────
+
+async def _consolidate(
+    llm: "ChatOpenAI",
+    all_comments: list[dict],
+    review_guidance: str,
+    max_context_tokens: int,
+    graph_response_tokens: int,
+) -> list[dict]:
+    """Merge and deduplicate comments from all sub-agents."""
+    if not all_comments:
+        return []
+
+    system = (
+        "Ты опытный редактор, который объединяет комментарии код-ревью. "
+        "Отвечай только по-русски и верни только JSON."
+    )
+    prompt = (
+        "Ты собрал комментарии из нескольких агентов.\n"
+        "Удали точные дубликаты, объедини пересекающиеся замечания про одну "
+        "строку, проверь корректность severity. "
+        "Сохрани все уникальные и практические замечания.\n\n"
+        "Комментарии для консолидации:\n"
+        f"{json.dumps(all_comments, indent=2, ensure_ascii=False)}\n\n"
+        f"Дополнительные инструкции:\n{review_guidance}\n\n"
+        f"Верни только JSON-массив. Элемент: {_COMMENT_SCHEMA}\n"
+        f"Все comment только по-русски.\n{_LINE_RANGE_GUIDANCE}"
+    )
+
+    try:
+        _available_prompt_tokens(
+            max_context_tokens=max_context_tokens,
+            fixed_texts=[system, prompt],
+            response_tokens=graph_response_tokens,
+        )
+    except LLMServiceError:
+        return _deduplicate_comments(all_comments)
+
+    raw = await (llm | StrOutputParser()).ainvoke([
+        SystemMessage(content=system),
+        HumanMessage(content=prompt),
+    ])
+    try:
+        final = _extract_json(raw)
+    except LLMServiceError as exc:
+        _log_llm_parse_failure(
+            stage="consolidator", output=raw, error=exc
+        )
+        return _deduplicate_comments(all_comments)
+
+    normalized = []
+    for c in final:
+        sev = c.get("severity", "info")
+        if sev not in ("info", "warning", "error"):
+            sev = "info"
+        normalized.append(_normalize_comment({**c, "severity": sev}))
+    return normalized
+
+
+# ── Internal orchestration pass ──────────────────────────────────────────────
+
+async def _run_agentic_pipeline(
+    *,
+    llm: "ChatOpenAI",
+    tools: list,
+    diff_chunk: str,
+    system_text: str,
+    review_guidance: str,
+    plan_context_tokens: int,
+    max_context_tokens: int,
+    graph_response_tokens: int,
+) -> list[dict]:
+    """
+    One full orchestrator pass on *diff_chunk*:
+    plan → (security ‖ quality) → consolidate.
+    """
+    # Orchestrator plans the review
+    plan = await _plan_review(llm, diff_chunk, plan_context_tokens)
+
+    # Sub-agents run concurrently (each with its own ReAct loop)
+    security_comments, quality_comments = await asyncio.gather(
+        _security_agent(
+            llm, tools, diff_chunk, plan, review_guidance, system_text
+        ),
+        _quality_agent(
+            llm, tools, diff_chunk, plan, review_guidance, system_text
+        ),
+    )
+
+    # Consolidate
+    return await _consolidate(
+        llm,
+        security_comments + quality_comments,
+        review_guidance,
+        max_context_tokens,
+        graph_response_tokens,
+    )
+
+
+# ── Public entry point ───────────────────────────────────────────────────────
 
 async def run_review_graph(
     diff: str,
@@ -100,14 +487,23 @@ async def run_review_graph(
     api_key: str | None,
     job_id: str | None = None,
     triggered_by_id: str | None = None,
+    # Agentic context — enables tools for sub-agents
+    gitlab_client: "GitLabClient | None" = None,
+    project_id: int | None = None,
+    git_ref: str | None = None,
 ) -> list[dict]:
     """
-    Run the multi-step LangGraph review pipeline.
-    Falls back to single-shot review on graph errors.
+    Run the agentic review pipeline.
+
+    When *gitlab_client*, *project_id*, and *git_ref* are provided, each
+    sub-agent receives tools to fetch any repository file for deeper context.
+    Without them the pipeline still works (diff-only analysis).
+
+    Falls back to single-shot chain on unrecoverable errors.
     """
+    from app.services.event_log_service import log_event
+
     llm = _build_llm(model, api_key)
-    parser = StrOutputParser()
-    chain = llm | parser
 
     system_text = (
         _enforce_russian_output(system_prompt.content)
@@ -119,6 +515,7 @@ async def run_review_graph(
             "Все значения поля comment должны быть только на русском языке."
         )
     )
+
     graph_response_tokens = _scaled_token_budget(
         max_context_tokens=model.max_context_tokens,
         ratio=_GRAPH_RESPONSE_RATIO,
@@ -131,135 +528,116 @@ async def run_review_graph(
         minimum=_MIN_PLAN_CONTEXT_TOKENS,
         maximum=_MAX_PLAN_CONTEXT_TOKENS,
     )
-    review_guidance = _render_review_prompt_instructions(review_prompt.content, metadata)
 
-    plan_fixed_text = """Проанализируй этот дифф и перечисли:
-1. Какие файлы изменены и за что они отвечают
-2. Главные 3-5 направления для ревью (безопасность, производительность, логика, стиль, тесты)
-3. Явные тревожные сигналы
+    review_guidance = _render_review_prompt_instructions(
+        review_prompt.content, metadata
+    )
 
-Дифф:
+    # Build tools (empty list if no GitLab context)
+    tools: list = []
+    if gitlab_client and project_id and git_ref:
+        from app.langchain_integration.agent_tools import make_gitlab_tools
+        tools = make_gitlab_tools(gitlab_client, project_id, git_ref)
 
-Ответь кратким текстом на русском языке, не JSON."""
-    review_plan_placeholder = "x" * (plan_context_tokens * 4)
-    security_fixed_text = f"""Проведи ревью только на предмет проблем безопасности:
-- Инъекции (SQL, command, XSS, path traversal)
-- Ошибки auth/authz, отсутствующие проверки
-- Секреты и учетные данные в коде
-- Небезопасная десериализация или криптография
-- OWASP Top 10
-
-Контекст плана ревью:
-{review_plan_placeholder}
-
-Дополнительные инструкции ревью:
-{review_guidance}
-
-Дифф:
-
-Верни только JSON-массив. Каждый элемент: {{"file_path": str|null, "start_line": int|null, "end_line": int|null, "severity": "info"|"warning"|"error", "comment": str}}
-Все значения поля comment должны быть только на русском языке.
-{_LINE_RANGE_GUIDANCE}"""
-    quality_fixed_text = f"""Проведи ревью качества кода, поддерживаемости и корректности:
-- Баги и ошибки логики
-- Проблемы производительности (N+1 запросы, лишние циклы, отсутствующие индексы)
-- Отсутствующая обработка ошибок
-- Мертвый код и неиспользуемые переменные
-- Отсутствующие или слабые тесты
-- Проблемы дизайна API
-
-Контекст плана ревью:
-{review_plan_placeholder}
-
-Дополнительные инструкции ревью:
-{review_guidance}
-
-Дифф:
-
-Верни только JSON-массив. Каждый элемент: {{"file_path": str|null, "start_line": int|null, "end_line": int|null, "severity": "info"|"warning"|"error", "comment": str}}
-Все значения поля comment должны быть только на русском языке.
-{_LINE_RANGE_GUIDANCE}"""
-
+    # Chunk budget — smallest across all sub-agent prompt templates
     graph_chunk_budget = min(
         _available_prompt_tokens(
             max_context_tokens=model.max_context_tokens,
-            fixed_texts=[
-                "Ты ведущий инженер и планируешь код-ревью. Отвечай только по-русски.",
-                plan_fixed_text,
-            ],
+            fixed_texts=["plan system", "plan prompt"],
             response_tokens=graph_response_tokens,
         ),
         _available_prompt_tokens(
             max_context_tokens=model.max_context_tokens,
-            fixed_texts=[system_text, security_fixed_text],
+            fixed_texts=[system_text, review_guidance, "security task"],
             response_tokens=graph_response_tokens,
         ),
         _available_prompt_tokens(
             max_context_tokens=model.max_context_tokens,
-            fixed_texts=[system_text, quality_fixed_text],
+            fixed_texts=[system_text, review_guidance, "quality task"],
             response_tokens=graph_response_tokens,
         ),
     )
 
-    from app.services.event_log_service import log_event
-
-    # Chunk diff to the smallest graph-stage budget.
     chunks = _chunk_diff(diff, graph_chunk_budget)
     all_comments: list[dict] = []
-    _log_details_base = {
+    _log_base = {
         "job_id": job_id,
         "model": model.model_name,
         "diff_chars": len(diff),
         "chunks": len(chunks),
+        "agentic_tools": bool(tools),
     }
 
     await log_event(
-        None, "llm.review_started",
-        f"LangGraph review started — model '{model.model_name}', {len(chunks)} chunk(s)",
-        details=_log_details_base,
+        None,
+        "llm.review_started",
+        (
+            f"Agentic review started — model '{model.model_name}', "
+            f"{len(chunks)} chunk(s), "
+            f"tools={'enabled' if tools else 'disabled'}"
+        ),
+        details=_log_base,
     )
 
     for chunk_idx, chunk in enumerate(chunks):
-        state = ReviewState(
-            diff=chunk,
-            metadata=metadata,
-            system_prompt=system_text,
-            plan="",
-            security_comments=[],
-            quality_comments=[],
-            final_comments=[],
-        )
-
         try:
             await log_event(
-                None, "llm.call",
-                f"LangGraph pipeline — chunk {chunk_idx + 1}/{len(chunks)} (plan→security→quality→consolidate)",
-                details={**_log_details_base, "chunk": chunk_idx + 1, "chunk_chars": len(chunk)},
+                None,
+                "llm.call",
+                (
+                    f"Agentic pipeline — chunk {chunk_idx + 1}/{len(chunks)}"
+                    " (plan → security ‖ quality → consolidate)"
+                ),
+                details={
+                    **_log_base,
+                    "chunk": chunk_idx + 1,
+                    "chunk_chars": len(chunk),
+                },
             )
-            comments = await _run_graph(
-                llm,
-                chain,
-                parser,
-                state,
-                metadata,
-                review_guidance,
-                model.max_context_tokens,
-                plan_context_tokens,
-                graph_response_tokens,
+            comments = await _run_agentic_pipeline(
+                llm=llm,
+                tools=tools,
+                diff_chunk=chunk,
+                system_text=system_text,
+                review_guidance=review_guidance,
+                plan_context_tokens=plan_context_tokens,
+                max_context_tokens=model.max_context_tokens,
+                graph_response_tokens=graph_response_tokens,
             )
             await log_event(
-                None, "llm.response",
-                f"LangGraph chunk {chunk_idx + 1}/{len(chunks)} complete — {len(comments)} comment(s)",
-                details={**_log_details_base, "chunk": chunk_idx + 1, "comments": len(comments)},
+                None,
+                "llm.response",
+                (
+                    f"Agentic chunk {chunk_idx + 1}/{len(chunks)} "
+                    f"complete — {len(comments)} comment(s)"
+                ),
+                details={
+                    **_log_base,
+                    "chunk": chunk_idx + 1,
+                    "comments": len(comments),
+                },
             )
             all_comments.extend(comments)
-        except Exception as e:
-            logger.warning("LangGraph review failed, falling back to single-shot: %s", e)
+
+        except Exception as exc:
+            logger.warning(
+                "Agentic review failed on chunk %d, falling back: %s",
+                chunk_idx + 1,
+                exc,
+            )
             await log_event(
-                None, "llm.fallback",
-                f"LangGraph failed on chunk {chunk_idx + 1}, using single-shot fallback: {e}",
+                None,
+                "llm.fallback",
+                (
+                    f"Agentic review failed on chunk {chunk_idx + 1}, "
+                    f"using single-shot fallback: {exc}"
+                ),
                 level="warning",
-                details={**_log_details_base, "chunk": chunk_idx + 1, "error": str(e)},
+                details={
+                    **_log_base,
+                    "chunk": chunk_idx + 1,
+                    "error": str(exc),
+                },
             )
             from app.langchain_integration.chains import run_review_chain
             fallback = await run_review_chain(
@@ -273,158 +651,9 @@ async def run_review_graph(
             all_comments.extend(fallback)
 
     await log_event(
-        None, "llm.review_completed",
-        f"LangGraph review done — {len(all_comments)} total comment(s)",
-        details={**_log_details_base, "total_comments": len(all_comments)},
+        None,
+        "llm.review_completed",
+        f"Agentic review done — {len(all_comments)} total comment(s)",
+        details={**_log_base, "total_comments": len(all_comments)},
     )
     return all_comments
-
-
-async def _run_graph(
-    llm,
-    chain,
-    parser,
-    state: ReviewState,
-    metadata: dict,
-    review_guidance: str,
-    max_context_tokens: int,
-    plan_context_tokens: int,
-    graph_response_tokens: int,
-) -> list[dict]:
-    diff = state["diff"]
-    system_text = state["system_prompt"]
-
-    # ── Node 1: Planning ──────────────────────────────────────────────────────
-    plan_prompt = f"""Проанализируй этот дифф и перечисли:
-1. Какие файлы изменены и за что они отвечают
-2. Главные 3-5 направления для ревью (безопасность, производительность, логика, стиль, тесты)
-3. Явные тревожные сигналы
-
-Дифф:
-{diff}
-
-Ответь кратким текстом на русском языке, не JSON."""
-
-    plan = await chain.ainvoke([
-        SystemMessage(content="Ты ведущий инженер и планируешь код-ревью. Отвечай только по-русски."),
-        HumanMessage(content=plan_prompt),
-    ])
-    plan = _truncate_to_token_budget(plan, plan_context_tokens)
-
-    # ── Node 2: Security Review ────────────────────────────────────────────────
-    security_prompt = f"""Проведи ревью только на предмет проблем безопасности:
-- Инъекции (SQL, command, XSS, path traversal)
-- Ошибки auth/authz, отсутствующие проверки
-- Секреты и учетные данные в коде
-- Небезопасная десериализация или криптография
-- OWASP Top 10
-
-Контекст плана ревью:
-{plan}
-
-Дополнительные инструкции ревью:
-{review_guidance}
-
-Дифф:
-{diff}
-
-Верни только JSON-массив. Каждый элемент: {{"file_path": str|null, "start_line": int|null, "end_line": int|null, "severity": "info"|"warning"|"error", "comment": str}}
-Все значения поля comment должны быть только на русском языке.
-{_LINE_RANGE_GUIDANCE}"""
-
-    sec_raw = await chain.ainvoke([
-        SystemMessage(content=system_text),
-        HumanMessage(content=security_prompt),
-    ])
-
-    try:
-        security_comments = _extract_json(sec_raw)
-    except LLMServiceError as exc:
-        _log_llm_parse_failure(stage="graph_security", output=sec_raw, error=exc)
-        security_comments = []
-
-    # ── Node 3: Quality Review ─────────────────────────────────────────────────
-    quality_prompt = f"""Проведи ревью качества кода, поддерживаемости и корректности:
-- Баги и ошибки логики
-- Проблемы производительности (N+1 запросы, лишние циклы, отсутствующие индексы)
-- Отсутствующая обработка ошибок
-- Мертвый код и неиспользуемые переменные
-- Отсутствующие или слабые тесты
-- Проблемы дизайна API
-
-Контекст плана ревью:
-{plan}
-
-Дополнительные инструкции ревью:
-{review_guidance}
-
-Дифф:
-{diff}
-
-Верни только JSON-массив. Каждый элемент: {{"file_path": str|null, "start_line": int|null, "end_line": int|null, "severity": "info"|"warning"|"error", "comment": str}}
-Все значения поля comment должны быть только на русском языке.
-{_LINE_RANGE_GUIDANCE}"""
-
-    qual_raw = await chain.ainvoke([
-        SystemMessage(content=system_text),
-        HumanMessage(content=quality_prompt),
-    ])
-
-    try:
-        quality_comments = _extract_json(qual_raw)
-    except LLMServiceError as exc:
-        _log_llm_parse_failure(stage="graph_quality", output=qual_raw, error=exc)
-        quality_comments = []
-
-    # ── Node 4: Consolidation ──────────────────────────────────────────────────
-    all_raw = security_comments + quality_comments
-    if not all_raw:
-        return []
-
-    consolidate_prompt = f"""Ты собрал комментарии код-ревью из нескольких проходов.
-Удали точные дубликаты, объедини пересекающиеся комментарии про одну и ту же строку или диапазон строк и проверь корректность severity.
-Сохрани все уникальные и практические замечания.
-
-Комментарии для консолидации:
-{json.dumps(all_raw, indent=2)}
-
-Дополнительные инструкции ревью:
-{review_guidance}
-
-Верни только итоговый JSON-массив. Каждый элемент: {{"file_path": str|null, "start_line": int|null, "end_line": int|null, "severity": "info"|"warning"|"error", "comment": str}}
-Все значения поля comment должны быть только на русском языке.
-{_LINE_RANGE_GUIDANCE}"""
-
-    consolidation_system = (
-        "Ты опытный редактор, который объединяет комментарии код-ревью. "
-        "Отвечай только по-русски и верни только JSON."
-    )
-    try:
-        _available_prompt_tokens(
-            max_context_tokens=max_context_tokens,
-            fixed_texts=[consolidation_system, consolidate_prompt],
-            response_tokens=graph_response_tokens,
-        )
-    except LLMServiceError:
-        return _deduplicate_comments(all_raw)
-
-    final_raw = await chain.ainvoke([
-        SystemMessage(content=consolidation_system),
-        HumanMessage(content=consolidate_prompt),
-    ])
-
-    try:
-        final = _extract_json(final_raw)
-    except LLMServiceError as exc:
-        _log_llm_parse_failure(stage="graph_consolidate", output=final_raw, error=exc)
-        final = _deduplicate_comments(all_raw)
-
-    # Normalize
-    normalized = []
-    for c in final:
-        sev = c.get("severity", "info")
-        if sev not in ("info", "warning", "error"):
-            sev = "info"
-        normalized.append(_normalize_comment({**c, "severity": sev}))
-
-    return normalized

@@ -155,12 +155,15 @@ async def _execute_review(job_id: uuid.UUID) -> dict:
             position_resolver: GitLabDiffPositionResolver | None = None
 
             # Fetch diff + metadata
+            git_ref: str | None = None
             if job.trigger_type == "commit":
                 commit_changes = await gitlab.get_commit_diff_entries(
                     repo.gitlab_project_id, job.commit_sha
                 )
                 diff = _format_diff(commit_changes)
-                commit_info = await gitlab.get_commit(repo.gitlab_project_id, job.commit_sha)
+                commit_info = await gitlab.get_commit(
+                    repo.gitlab_project_id, job.commit_sha
+                )
                 parent_sha = (commit_info.get("parent_ids") or [None])[0]
                 position_resolver = GitLabDiffPositionResolver(
                     base_sha=parent_sha,
@@ -168,6 +171,7 @@ async def _execute_review(job_id: uuid.UUID) -> dict:
                     head_sha=job.commit_sha,
                     changes=commit_changes,
                 )
+                git_ref = job.commit_sha
                 metadata = {
                     "commit_sha": job.commit_sha,
                     "repository_name": repo.name,
@@ -184,7 +188,9 @@ async def _execute_review(job_id: uuid.UUID) -> dict:
                 )
                 mr_changes = mr_changes_payload.get("changes", [])
                 diff = _format_diff(mr_changes)
-                mr_info = await gitlab.get_mr(repo.gitlab_project_id, job.mr_iid)
+                mr_info = await gitlab.get_mr(
+                    repo.gitlab_project_id, job.mr_iid
+                )
                 diff_refs = mr_info.get("diff_refs") or {}
                 position_resolver = GitLabDiffPositionResolver(
                     base_sha=diff_refs.get("base_sha"),
@@ -192,9 +198,12 @@ async def _execute_review(job_id: uuid.UUID) -> dict:
                     head_sha=diff_refs.get("head_sha"),
                     changes=mr_changes,
                 )
+                git_ref = diff_refs.get("head_sha")
                 metadata = {
                     "mr_title": mr_info.get("title", ""),
-                    "mr_description": mr_info.get("description", "")[:500],
+                    "mr_description": (
+                        mr_info.get("description", "")[:500]
+                    ),
                     "repository_name": repo.name,
                     "source_branch": mr_info.get("source_branch", ""),
                     "target_branch": mr_info.get("target_branch", ""),
@@ -218,7 +227,7 @@ async def _execute_review(job_id: uuid.UUID) -> dict:
             job.prompt_id = review_prompt.id
             await db.commit()
 
-            # ── LangGraph multi-step review pipeline ──────────────────────────
+            # ── Agentic review pipeline ───────────────────────────────────────
             comments_data = await run_review_graph(
                 diff=diff,
                 metadata=metadata,
@@ -227,7 +236,13 @@ async def _execute_review(job_id: uuid.UUID) -> dict:
                 model=model,
                 api_key=api_key,
                 job_id=str(job_id),
-                triggered_by_id=str(job.triggered_by_id) if job.triggered_by_id else None,
+                triggered_by_id=(
+                    str(job.triggered_by_id)
+                    if job.triggered_by_id else None
+                ),
+                gitlab_client=gitlab,
+                project_id=repo.gitlab_project_id,
+                git_ref=git_ref,
             )
 
             # Persist + post each comment
