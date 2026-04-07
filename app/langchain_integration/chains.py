@@ -33,6 +33,9 @@ _RUSSIAN_OUTPUT_CONSTRAINT = textwrap.dedent("""
     Отвечай только по-русски.
     Верни только JSON.
     Все значения поля comment должны быть только на русском языке.
+    Если замечание относится к нескольким соседним строкам одного непрерывного блока,
+    укажи весь диапазон: start_line — первая затронутая строка, end_line — последняя.
+    Не своди такой комментарий к одной строке.
 """).strip()
 
 
@@ -269,13 +272,15 @@ async def run_review_chain(
     llm = _build_llm(model, api_key)
     parser = StrOutputParser()
 
-    system_text = _enforce_russian_output(system_prompt.content) if system_prompt else textwrap.dedent("""
-        Ты опытный ревьюер кода.
-        Отвечай только по-русски.
-        Верни только корректный JSON-массив.
-        Без markdown, без пояснений вне JSON.
-        Все тексты комментариев должны быть только на русском языке.
-    """).strip()
+    system_text = _enforce_russian_output(system_prompt.content) if system_prompt else _enforce_russian_output(
+        textwrap.dedent("""
+            Ты опытный ревьюер кода.
+            Отвечай только по-русски.
+            Верни только корректный JSON-массив.
+            Без markdown, без пояснений вне JSON.
+            Все тексты комментариев должны быть только на русском языке.
+        """).strip()
+    )
 
     # Format the review prompt with metadata
     human_text = _enforce_russian_output(

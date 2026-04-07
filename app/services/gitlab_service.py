@@ -46,6 +46,37 @@ class GitLabClient:
             )
         return r.json()
 
+    async def _delete(self, path: str, *, allow_missing: bool = False) -> None:
+        url = f"{self._base}/api/v4{path}"
+        async with httpx.AsyncClient(timeout=30, trust_env=False) as client:
+            r = await client.delete(url, headers=self._headers)
+        if r.status_code == 404 and allow_missing:
+            return
+        if not r.is_success:
+            raise GitLabServiceError(
+                f"GitLab DELETE {path} failed: {r.status_code} {r.text[:200]}"
+            )
+
+    async def _list_paginated(self, path: str, params: dict | None = None) -> list[dict]:
+        page = 1
+        items: list[dict] = []
+
+        while True:
+            payload, response = await self._get_with_response(
+                path,
+                params={**(params or {}), "per_page": 100, "page": page},
+            )
+            if not isinstance(payload, list):
+                break
+
+            items.extend(item for item in payload if isinstance(item, dict))
+            next_page = response.headers.get("X-Next-Page")
+            if not next_page:
+                break
+            page = int(next_page)
+
+        return items
+
     # ── Commit ──────────────────────────────────────────────────────────────
 
     async def get_commit(self, project_id: int, sha: str) -> dict:
@@ -86,6 +117,11 @@ class GitLabClient:
         data = await self._get(f"/projects/{project_id}/repository/commits/{sha}/diff")
         return data if isinstance(data, list) else []
 
+    async def list_commit_discussions(self, project_id: int, sha: str) -> list[dict]:
+        return await self._list_paginated(
+            f"/projects/{project_id}/repository/commits/{sha}/discussions"
+        )
+
     async def post_commit_comment(
         self,
         project_id: int,
@@ -118,6 +154,19 @@ class GitLabClient:
             payload,
         )
 
+    async def delete_commit_discussion_note(
+        self,
+        project_id: int,
+        sha: str,
+        discussion_id: str,
+        note_id: str,
+    ) -> None:
+        await self._delete(
+            f"/projects/{project_id}/repository/commits/{sha}/discussions/"
+            f"{discussion_id}/notes/{note_id}",
+            allow_missing=True,
+        )
+
     # ── Merge Request ───────────────────────────────────────────────────────
 
     async def get_mr(self, project_id: int, mr_iid: int) -> dict:
@@ -132,6 +181,11 @@ class GitLabClient:
             f"/projects/{project_id}/merge_requests/{mr_iid}/changes"
         )
         return data if isinstance(data, dict) else {}
+
+    async def list_mr_discussions(self, project_id: int, mr_iid: int) -> list[dict]:
+        return await self._list_paginated(
+            f"/projects/{project_id}/merge_requests/{mr_iid}/discussions"
+        )
 
     async def post_mr_note(self, project_id: int, mr_iid: int, body: str) -> dict:
         return await self._post(
@@ -152,6 +206,19 @@ class GitLabClient:
         return await self._post(
             f"/projects/{project_id}/merge_requests/{mr_iid}/discussions",
             payload,
+        )
+
+    async def delete_mr_discussion_note(
+        self,
+        project_id: int,
+        mr_iid: int,
+        discussion_id: str,
+        note_id: str,
+    ) -> None:
+        await self._delete(
+            f"/projects/{project_id}/merge_requests/{mr_iid}/discussions/"
+            f"{discussion_id}/notes/{note_id}",
+            allow_missing=True,
         )
 
 

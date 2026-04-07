@@ -54,6 +54,11 @@ _MAX_GRAPH_RESPONSE_TOKENS = 1536
 _PLAN_CONTEXT_RATIO = 0.10
 _MIN_PLAN_CONTEXT_TOKENS = 128
 _MAX_PLAN_CONTEXT_TOKENS = 1024
+_LINE_RANGE_GUIDANCE = (
+    "Если замечание относится к нескольким соседним строкам одного непрерывного блока, "
+    "верни весь диапазон: start_line — первая строка, end_line — последняя. "
+    "Не своди такие замечания к одной строке."
+)
 
 
 class ReviewState(TypedDict):
@@ -103,7 +108,7 @@ async def run_review_graph(
     system_text = (
         _enforce_russian_output(system_prompt.content)
         if system_prompt
-        else (
+        else _enforce_russian_output(
             "Ты опытный ревьюер кода. "
             "Отвечай только по-русски. "
             "Верни только корректный JSON без текста вне JSON. "
@@ -145,7 +150,8 @@ async def run_review_graph(
 Дифф:
 
 Верни только JSON-массив. Каждый элемент: {{"file_path": str|null, "start_line": int|null, "end_line": int|null, "severity": "info"|"warning"|"error", "comment": str}}
-Все значения поля comment должны быть только на русском языке."""
+Все значения поля comment должны быть только на русском языке.
+{_LINE_RANGE_GUIDANCE}"""
     quality_fixed_text = f"""Проведи ревью качества кода, поддерживаемости и корректности:
 - Баги и ошибки логики
 - Проблемы производительности (N+1 запросы, лишние циклы, отсутствующие индексы)
@@ -160,7 +166,8 @@ async def run_review_graph(
 Дифф:
 
 Верни только JSON-массив. Каждый элемент: {{"file_path": str|null, "start_line": int|null, "end_line": int|null, "severity": "info"|"warning"|"error", "comment": str}}
-Все значения поля comment должны быть только на русском языке."""
+Все значения поля comment должны быть только на русском языке.
+{_LINE_RANGE_GUIDANCE}"""
 
     graph_chunk_budget = min(
         _available_prompt_tokens(
@@ -274,7 +281,8 @@ async def _run_graph(
 {diff}
 
 Верни только JSON-массив. Каждый элемент: {{"file_path": str|null, "start_line": int|null, "end_line": int|null, "severity": "info"|"warning"|"error", "comment": str}}
-Все значения поля comment должны быть только на русском языке."""
+Все значения поля comment должны быть только на русском языке.
+{_LINE_RANGE_GUIDANCE}"""
 
     sec_raw = await chain.ainvoke([
         SystemMessage(content=system_text),
@@ -302,7 +310,8 @@ async def _run_graph(
 {diff}
 
 Верни только JSON-массив. Каждый элемент: {{"file_path": str|null, "start_line": int|null, "end_line": int|null, "severity": "info"|"warning"|"error", "comment": str}}
-Все значения поля comment должны быть только на русском языке."""
+Все значения поля comment должны быть только на русском языке.
+{_LINE_RANGE_GUIDANCE}"""
 
     qual_raw = await chain.ainvoke([
         SystemMessage(content=system_text),
@@ -327,7 +336,8 @@ async def _run_graph(
 {json.dumps(all_raw, indent=2)}
 
 Верни только итоговый JSON-массив. Каждый элемент: {{"file_path": str|null, "start_line": int|null, "end_line": int|null, "severity": "info"|"warning"|"error", "comment": str}}
-Все значения поля comment должны быть только на русском языке."""
+Все значения поля comment должны быть только на русском языке.
+{_LINE_RANGE_GUIDANCE}"""
 
     consolidation_system = (
         "Ты опытный редактор, который объединяет комментарии код-ревью. "

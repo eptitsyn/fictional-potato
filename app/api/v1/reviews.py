@@ -2,8 +2,13 @@ import uuid
 
 from fastapi import APIRouter
 
-from app.dependencies import CurrentUser, DB, ReviewerUser
-from app.schemas.review import ReviewCommentRead, ReviewJobDetailRead, ReviewJobRead, ReviewTriggerRequest
+from app.dependencies import DB, ReviewerUser
+from app.schemas.review import (
+    ReviewCommentRead,
+    ReviewJobDetailRead,
+    ReviewJobRead,
+    ReviewTriggerRequest,
+)
 from app.services import review_service as svc
 
 router = APIRouter(prefix="/reviews", tags=["reviews"])
@@ -33,3 +38,13 @@ async def get_comments(job_id: uuid.UUID, db: DB, _: ReviewerUser):
 @router.post("/{job_id}/retry", response_model=ReviewJobRead, status_code=202)
 async def retry_review(job_id: uuid.UUID, db: DB, _: ReviewerUser):
     return await svc.retry_job(db, job_id)
+
+
+@router.post("/{job_id}/restart", response_model=ReviewJobRead, status_code=202)
+async def restart_review(job_id: uuid.UUID, db: DB, _: ReviewerUser):
+    return await svc.restart_job(db, job_id)
+
+
+@router.delete("/{job_id}", status_code=204)
+async def delete_review(job_id: uuid.UUID, db: DB, _: ReviewerUser):
+    await svc.delete_job(db, job_id)

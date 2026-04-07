@@ -5,6 +5,7 @@ from app.langchain_integration.chains import (
     _available_prompt_tokens,
     _chunk_diff_for_prompt,
     _deduplicate_comments,
+    _enforce_russian_output,
     _render_review_prompt_template,
     _response_token_budget,
     _scaled_token_budget,
@@ -93,7 +94,7 @@ def test_render_review_prompt_template_keeps_diff_placeholder():
     )
 
     assert "Commit SHA: abc123" in rendered
-    assert "Repository: repo" in rendered
+    assert "Репозиторий: repo" in rendered
     assert "{diff}" in rendered
     assert "--- a/file.py" not in rendered
 
@@ -105,6 +106,14 @@ def test_truncate_to_token_budget_marks_truncation():
 
     assert truncated.endswith("...[truncated]")
     assert len(truncated) < len(source)
+
+
+def test_enforce_russian_output_adds_line_range_guidance():
+    enforced = _enforce_russian_output("Проведи ревью диффа.")
+
+    assert "Если замечание относится к нескольким соседним строкам" in enforced
+    assert "start_line" in enforced
+    assert "end_line" in enforced
 
 
 def test_deduplicate_comments_normalizes_exact_duplicates():
