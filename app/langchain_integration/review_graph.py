@@ -104,6 +104,37 @@ _COMMENT_SCHEMA = (
     '"severity": "info"|"warning"|"error", "comment": str}'
 )
 
+# Limits for stored prompt/response text (chars). Large enough to be useful.
+_LOG_PROMPT_LIMIT = 20_000
+_LOG_RESPONSE_LIMIT = 10_000
+
+
+async def _log_llm_exchange(
+    *,
+    job_id: str | None,
+    model_name: str,
+    stage: str,
+    prompt: str,
+    response: str,
+) -> None:
+    """Log one LLM request+response pair to event_logs."""
+    from app.services.event_log_service import log_event
+
+    await log_event(
+        None,
+        "llm.exchange",
+        f"LLM exchange — stage '{stage}'",
+        details={
+            "job_id": job_id,
+            "model": model_name,
+            "stage": stage,
+            "prompt_chars": len(prompt),
+            "response_chars": len(response),
+            "prompt": prompt[:_LOG_PROMPT_LIMIT],
+            "response": response[:_LOG_RESPONSE_LIMIT],
+        },
+    )
+
 
 # ── ReAct agent loop ─────────────────────────────────────────────────────────
 
@@ -131,6 +162,9 @@ async def _run_agent(
     task_prompt: str,
     *,
     max_iterations: int = _MAX_TOOL_ITERATIONS,
+    job_id: str | None = None,
+    model_name: str = "",
+    stage: str = "agent",
 ) -> str:
     """
     ReAct-style agent loop with planning, memory, and self-reflection.
@@ -171,6 +205,12 @@ async def _run_agent(
         HumanMessage(content=plan_prompt),
     ])
     logger.debug("Agent plan: %s", plan_raw[:300])
+    await _log_llm_exchange(
+        job_id=job_id, model_name=model_name,
+        stage=f"{stage}.plan",
+        prompt=f"[SYSTEM]\n{plan_system}\n\n[USER]\n{plan_prompt}",
+        response=plan_raw,
+    )
 
     # ── Build conversation with plan as memory seed ──────────────────────────
     messages = [
@@ -188,7 +228,16 @@ async def _run_agent(
 
     if not tools:
         # No tools — single-shot answer after planning
+        prompt_text = "\n".join(
+            f"[{m.__class__.__name__}]\n{m.content}" for m in messages
+        )
         answer = await (llm | parser).ainvoke(messages)
+        await _log_llm_exchange(
+            job_id=job_id, model_name=model_name,
+            stage=f"{stage}.act_no_tools",
+            prompt=prompt_text,
+            response=answer,
+        )
         return answer
 
     llm_with_tools = llm.bind_tools(tools)
@@ -199,6 +248,15 @@ async def _run_agent(
         messages.append(response)
 
         tool_calls = getattr(response, "tool_calls", None) or []
+        prompt_text = "\n".join(
+            f"[{m.__class__.__name__}]\n{getattr(m, 'content', '')}" for m in messages[:-1]
+        )
+        await _log_llm_exchange(
+            job_id=job_id, model_name=model_name,
+            stage=f"{stage}.act_iter_{iteration + 1}",
+            prompt=prompt_text,
+            response=response.content or f"[tool_calls: {[tc['name'] for tc in tool_calls]}]",
+        )
 
         if not tool_calls:
             # Agent decided it has enough information
@@ -247,18 +305,21 @@ async def _run_agent(
     logger.warning(
         "Agent reached max_iterations=%d, forcing final answer", max_iterations
     )
-    forced = await (llm | parser).ainvoke(
-        messages
-        + [
-            HumanMessage(
-                content=(
-                    "Достигнут лимит шагов. "
-                    "Верни финальный JSON-массив замечаний "
-                    "по собранным данным.\n"
-                    f"Каждый элемент: {_COMMENT_SCHEMA}"
-                )
-            )
-        ]
+    force_msg = (
+        "Достигнут лимит шагов. "
+        "Верни финальный JSON-массив замечаний "
+        "по собранным данным.\n"
+        f"Каждый элемент: {_COMMENT_SCHEMA}"
+    )
+    final_messages = messages + [HumanMessage(content=force_msg)]
+    forced = await (llm | parser).ainvoke(final_messages)
+    await _log_llm_exchange(
+        job_id=job_id, model_name=model_name,
+        stage=f"{stage}.forced_final",
+        prompt="\n".join(
+            f"[{m.__class__.__name__}]\n{getattr(m, 'content', '')}" for m in final_messages
+        ),
+        response=forced,
     )
     return forced
 
@@ -269,6 +330,9 @@ async def _plan_review(
     llm: "ChatOpenAI",
     diff: str,
     plan_context_tokens: int,
+    *,
+    job_id: str | None = None,
+    model_name: str = "",
 ) -> str:
     """
     Orchestrator planning node — summarises the diff and identifies
@@ -283,15 +347,20 @@ async def _plan_review(
         f"Дифф:\n{diff}\n\n"
         "Ответь кратким текстом на русском языке, не JSON."
     )
+    plan_system = (
+        "Ты ведущий инженер и планируешь код-ревью. "
+        "Отвечай только по-русски."
+    )
     plan = await (llm | StrOutputParser()).ainvoke([
-        SystemMessage(
-            content=(
-                "Ты ведущий инженер и планируешь код-ревью. "
-                "Отвечай только по-русски."
-            )
-        ),
+        SystemMessage(content=plan_system),
         HumanMessage(content=prompt),
     ])
+    await _log_llm_exchange(
+        job_id=job_id, model_name=model_name,
+        stage="orchestrator.plan",
+        prompt=f"[SYSTEM]\n{plan_system}\n\n[USER]\n{prompt}",
+        response=plan,
+    )
     return _truncate_to_token_budget(plan, plan_context_tokens)
 
 
@@ -304,6 +373,9 @@ async def _security_agent(
     plan: str,
     review_guidance: str,
     system_text: str,
+    *,
+    job_id: str | None = None,
+    model_name: str = "",
 ) -> list[dict]:
     """
     Security sub-agent — ReAct loop focused on OWASP Top 10,
@@ -329,7 +401,10 @@ async def _security_agent(
         f"Итоговый ответ: JSON-массив. Элемент: {_COMMENT_SCHEMA}\n"
         f"Все comment только по-русски.\n{_LINE_RANGE_GUIDANCE}"
     )
-    raw = await _run_agent(llm, tools, system, goal, task)
+    raw = await _run_agent(
+        llm, tools, system, goal, task,
+        job_id=job_id, model_name=model_name, stage="security_agent",
+    )
     try:
         return _extract_json(raw)
     except LLMServiceError as exc:
@@ -344,6 +419,9 @@ async def _quality_agent(
     plan: str,
     review_guidance: str,
     system_text: str,
+    *,
+    job_id: str | None = None,
+    model_name: str = "",
 ) -> list[dict]:
     """
     Quality sub-agent — ReAct loop focused on bugs, performance,
@@ -369,7 +447,10 @@ async def _quality_agent(
         f"Итоговый ответ: JSON-массив. Элемент: {_COMMENT_SCHEMA}\n"
         f"Все comment только по-русски.\n{_LINE_RANGE_GUIDANCE}"
     )
-    raw = await _run_agent(llm, tools, system, goal, task)
+    raw = await _run_agent(
+        llm, tools, system, goal, task,
+        job_id=job_id, model_name=model_name, stage="quality_agent",
+    )
     try:
         return _extract_json(raw)
     except LLMServiceError as exc:
@@ -385,6 +466,9 @@ async def _consolidate(
     review_guidance: str,
     max_context_tokens: int,
     graph_response_tokens: int,
+    *,
+    job_id: str | None = None,
+    model_name: str = "",
 ) -> list[dict]:
     """Merge and deduplicate comments from all sub-agents."""
     if not all_comments:
@@ -419,6 +503,12 @@ async def _consolidate(
         SystemMessage(content=system),
         HumanMessage(content=prompt),
     ])
+    await _log_llm_exchange(
+        job_id=job_id, model_name=model_name,
+        stage="consolidator",
+        prompt=f"[SYSTEM]\n{system}\n\n[USER]\n{prompt}",
+        response=raw,
+    )
     try:
         final = _extract_json(raw)
     except LLMServiceError as exc:
@@ -448,21 +538,28 @@ async def _run_agentic_pipeline(
     plan_context_tokens: int,
     max_context_tokens: int,
     graph_response_tokens: int,
+    job_id: str | None = None,
+    model_name: str = "",
 ) -> list[dict]:
     """
     One full orchestrator pass on *diff_chunk*:
     plan → (security ‖ quality) → consolidate.
     """
     # Orchestrator plans the review
-    plan = await _plan_review(llm, diff_chunk, plan_context_tokens)
+    plan = await _plan_review(
+        llm, diff_chunk, plan_context_tokens,
+        job_id=job_id, model_name=model_name,
+    )
 
     # Sub-agents run concurrently (each with its own ReAct loop)
     security_comments, quality_comments = await asyncio.gather(
         _security_agent(
-            llm, tools, diff_chunk, plan, review_guidance, system_text
+            llm, tools, diff_chunk, plan, review_guidance, system_text,
+            job_id=job_id, model_name=model_name,
         ),
         _quality_agent(
-            llm, tools, diff_chunk, plan, review_guidance, system_text
+            llm, tools, diff_chunk, plan, review_guidance, system_text,
+            job_id=job_id, model_name=model_name,
         ),
     )
 
@@ -473,6 +570,8 @@ async def _run_agentic_pipeline(
         review_guidance,
         max_context_tokens,
         graph_response_tokens,
+        job_id=job_id,
+        model_name=model_name,
     )
 
 
@@ -603,6 +702,8 @@ async def run_review_graph(
                 plan_context_tokens=plan_context_tokens,
                 max_context_tokens=model.max_context_tokens,
                 graph_response_tokens=graph_response_tokens,
+                job_id=job_id,
+                model_name=model.model_name,
             )
             await log_event(
                 None,
