@@ -75,6 +75,10 @@ class GitLabDiffPositionResolver:
                     position["new_line"] = start_pos.new_line
                 return position
 
+            if end_pos.old_line is not None:
+                position["old_line"] = end_pos.old_line
+            if end_pos.new_line is not None:
+                position["new_line"] = end_pos.new_line
             position["line_range"] = {
                 "start": self._serialize_range_endpoint(start_pos),
                 "end": self._serialize_range_endpoint(end_pos),
