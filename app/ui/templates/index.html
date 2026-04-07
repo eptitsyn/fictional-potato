@@ -195,6 +195,7 @@
       <a onclick="showPage('prompts')"><span class="icon">💬</span> Prompts</a>
       <a onclick="showPage('reviews')"><span class="icon">🔍</span> Reviews</a>
       <a onclick="showPage('workers')"><span class="icon">⚙️</span> Workers</a>
+      <a onclick="showPage('logs')"><span class="icon">📋</span> Request Logs</a>
     </nav>
     <div class="user-bar">
       <div><strong id="sidebar-username">—</strong><br><small id="sidebar-role">—</small></div>
@@ -312,6 +313,24 @@
           <table>
             <thead><tr><th>ID</th><th>Repository</th><th>Type</th><th>Ref</th><th>Status</th><th>Created</th><th>Actions</th></tr></thead>
             <tbody id="reviews-body"></tbody>
+          </table>
+        </div>
+      </div>
+
+      <!-- LOGS -->
+      <div id="page-logs" class="page">
+        <div class="toolbar">
+          <h2>Request Logs</h2>
+          <div style="display:flex;align-items:center;gap:12px">
+            <span id="logs-last-refresh" style="font-size:12px;color:var(--text-muted)"></span>
+            <button class="btn btn-secondary refresh-btn" onclick="loadLogs()">↻ Refresh</button>
+            <button class="btn btn-secondary refresh-btn" id="logs-live-btn" onclick="toggleLogsLive()">Live: OFF</button>
+          </div>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>Time</th><th>User</th><th>IP</th><th>Method</th><th>Path</th><th>Status</th></tr></thead>
+            <tbody id="logs-body"></tbody>
           </table>
         </div>
       </div>
@@ -713,7 +732,7 @@ async function initApp() {
 const pageTitles = {
   dashboard: 'Dashboard', endpoints: 'LLM Endpoints', models: 'LLM Models',
   'git-servers': 'Git Servers', repositories: 'Repositories', users: 'Users', prompts: 'Prompts', reviews: 'Review Jobs',
-  workers: 'Worker Status',
+  workers: 'Worker Status', logs: 'Request Logs',
 };
 
 function renderPage(name) {
@@ -745,6 +764,7 @@ async function loadPage(name) {
     else if (name === 'prompts') await loadPrompts();
     else if (name === 'reviews') await loadReviews();
     else if (name === 'workers') await loadWorkers();
+    else if (name === 'logs') await loadLogs();
     debugLog('Load page complete', { name });
   } catch (error) {
     debugError('Load page failed', { name, error });
@@ -1645,7 +1665,7 @@ function toggleAutoRefresh() {
   }
 }
 
-// Stop auto-refresh when leaving the workers page
+// Stop auto-refresh when leaving the workers page; stop live logs when leaving logs page
 function showPage(name) {
   debugLog('showPage invoked', { name, autoRefreshActive: !!_autoRefreshTimer });
   if (name !== 'workers' && _autoRefreshTimer) {
@@ -1654,7 +1674,51 @@ function showPage(name) {
     const btn = document.getElementById('workers-auto-btn');
     if (btn) { btn.textContent = 'Auto-refresh: OFF'; btn.classList.remove('btn-primary'); btn.classList.add('btn-secondary'); }
   }
+  if (name !== 'logs' && _logsLiveTimer) {
+    clearInterval(_logsLiveTimer);
+    _logsLiveTimer = null;
+    const btn = document.getElementById('logs-live-btn');
+    if (btn) { btn.textContent = 'Live: OFF'; btn.classList.remove('btn-primary'); btn.classList.add('btn-secondary'); }
+  }
   renderPage(name);
+}
+
+// ── Request Logs ──────────────────────────────────────────────────────────────
+let _logsLiveTimer = null;
+
+async function loadLogs() {
+  const logs = await api('GET', '/request-logs?limit=200').catch(() => []);
+  const tbody = document.getElementById('logs-body');
+  tbody.innerHTML = (logs || []).map(l => {
+    const statusClass = l.status_code < 300 ? 'completed' : l.status_code < 500 ? 'warning' : 'failed';
+    const methodColor = l.method === 'GET' ? 'var(--accent)' : l.method === 'POST' ? 'var(--success)' : l.method === 'DELETE' ? 'var(--danger)' : 'var(--text-muted)';
+    return `<tr>
+      <td style="white-space:nowrap">${fmtDate(l.timestamp)}</td>
+      <td>${l.username ? escHtml(l.username) : '<span style="color:var(--text-muted)">—</span>'}</td>
+      <td><code>${l.ip_address || '—'}</code></td>
+      <td><code style="color:${methodColor}">${l.method}</code></td>
+      <td><code style="word-break:break-all">${escHtml(l.path)}</code></td>
+      <td><span class="badge badge-${statusClass}">${l.status_code}</span></td>
+    </tr>`;
+  }).join('') || '<tr><td colspan="6" style="color:var(--text-muted);text-align:center;padding:20px">No logs yet</td></tr>';
+  document.getElementById('logs-last-refresh').textContent = 'Updated: ' + new Date().toLocaleTimeString();
+}
+
+function toggleLogsLive() {
+  const btn = document.getElementById('logs-live-btn');
+  if (_logsLiveTimer) {
+    clearInterval(_logsLiveTimer);
+    _logsLiveTimer = null;
+    btn.textContent = 'Live: OFF';
+    btn.classList.remove('btn-primary');
+    btn.classList.add('btn-secondary');
+  } else {
+    loadLogs();
+    _logsLiveTimer = setInterval(loadLogs, 3000);
+    btn.textContent = 'Live: ON (3s)';
+    btn.classList.remove('btn-secondary');
+    btn.classList.add('btn-primary');
+  }
 }
 
 // ── Utilities ──────────────────────────────────────────────────────────────────
