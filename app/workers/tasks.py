@@ -6,15 +6,19 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import uuid
 from datetime import UTC, datetime
 from typing import Any
 
 from celery import Task
+from celery.signals import worker_process_init, worker_process_shutdown
 
 from app.workers.celery_app import celery_app
 
 logger = logging.getLogger(__name__)
+_runner: asyncio.Runner | None = None
+_runner_pid: int | None = None
 
 
 class ReviewTask(Task):
@@ -27,7 +31,52 @@ class ReviewTask(Task):
 @celery_app.task(bind=True, base=ReviewTask, name="app.workers.tasks.run_review_job")
 def run_review_job(self, job_id: str) -> dict:
     """Celery entry point — delegates to async pipeline."""
-    return asyncio.run(_execute_review(uuid.UUID(job_id)))
+    return _run_review_job_sync(uuid.UUID(job_id))
+
+
+def _get_runner() -> asyncio.Runner:
+    global _runner, _runner_pid
+
+    current_pid = os.getpid()
+    if _runner is None or _runner_pid != current_pid:
+        _close_runner()
+        _runner = asyncio.Runner()
+        _runner_pid = current_pid
+
+    return _runner
+
+
+def _close_runner() -> None:
+    global _runner, _runner_pid
+
+    if _runner is not None:
+        _runner.close()
+
+    _runner = None
+    _runner_pid = None
+
+
+def _run_review_job_sync(job_id: uuid.UUID) -> dict:
+    return _get_runner().run(_execute_review(job_id))
+
+
+@worker_process_init.connect
+def _reset_worker_async_state(**_: Any) -> None:
+    from app.core.database import reset_async_db_state
+
+    reset_async_db_state()
+    _close_runner()
+
+
+@worker_process_shutdown.connect
+def _dispose_worker_async_state(**_: Any) -> None:
+    from app.core.database import dispose_async_db_state
+
+    try:
+        if _runner is not None:
+            _runner.run(dispose_async_db_state())
+    finally:
+        _close_runner()
 
 
 async def _execute_review(job_id: uuid.UUID) -> dict:

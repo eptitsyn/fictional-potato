@@ -10,6 +10,7 @@ import math
 import re
 import textwrap
 from collections.abc import Sequence
+from typing import Any
 
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_core.output_parsers import StrOutputParser
@@ -184,11 +185,31 @@ def _extract_json(text: str) -> list[dict]:
     raise LLMServiceError(f"Could not parse LLM output as JSON array. Output: {text[:500]}")
 
 
+def _coerce_positive_int(value: Any) -> int | None:
+    if value is None or value == "":
+        return None
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        return None
+    return number if number > 0 else None
+
+
 def _normalize_comment(c: dict) -> dict:
+    line_number = _coerce_positive_int(c.get("start_line"))
+    if line_number is None:
+        line_number = _coerce_positive_int(c.get("line_number"))
+
+    line_end = _coerce_positive_int(c.get("end_line"))
+    if line_end is None:
+        line_end = _coerce_positive_int(c.get("line_end"))
+    if line_number is not None and line_end is not None and line_end < line_number:
+        line_number, line_end = line_end, line_number
+
     return {
         "file_path": c.get("file_path"),
-        "line_number": c.get("start_line", c.get("line_number")),
-        "line_end": c.get("end_line"),
+        "line_number": line_number,
+        "line_end": line_end,
         "severity": c.get("severity", "info"),
         "comment_body": c.get("comment", c.get("comment_body", "")),
     }

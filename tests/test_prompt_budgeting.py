@@ -138,6 +138,61 @@ def test_deduplicate_comments_normalizes_exact_duplicates():
     ]
 
 
+def test_deduplicate_comments_normalizes_numeric_strings():
+    comments = [
+        {
+            "file_path": "app/example.py",
+            "start_line": "12",
+            "end_line": "15",
+            "severity": "warning",
+            "comment": "Validate the bounds before slicing.",
+        },
+        {
+            "file_path": "app/example.py",
+            "line_number": 12,
+            "line_end": 15,
+            "severity": "warning",
+            "comment_body": "Validate the bounds before slicing.",
+        },
+    ]
+
+    deduplicated = _deduplicate_comments(comments)
+
+    assert deduplicated == [
+        {
+            "file_path": "app/example.py",
+            "line_number": 12,
+            "line_end": 15,
+            "severity": "warning",
+            "comment_body": "Validate the bounds before slicing.",
+        }
+    ]
+
+
+def test_deduplicate_comments_reorders_string_line_ranges():
+    comments = [
+        {
+            "file_path": "app/example.py",
+            "start_line": "20",
+            "end_line": "18",
+            "severity": "info",
+            "comment": "The reported range should be ordered.",
+        }
+    ]
+
+    deduplicated = _deduplicate_comments(comments)
+
+    assert deduplicated == [
+        {
+            "file_path": "app/example.py",
+            "line_number": 18,
+            "line_end": 20,
+            "severity": "info",
+            "comment_body": "The reported range should be ordered.",
+        }
+    ]
+
+
 def test_available_prompt_tokens_scales_with_model_context():
     small_budget = _available_prompt_tokens(
         max_context_tokens=4000,
