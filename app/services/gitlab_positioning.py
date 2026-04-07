@@ -38,7 +38,9 @@ class GitLabDiffPositionResolver:
         self._files = self._parse_changes(changes)
 
     def can_resolve(self) -> bool:
-        return bool(self._base_sha and self._start_sha and self._head_sha and self._files)
+        return bool(
+            self._base_sha and self._start_sha and self._head_sha and self._files
+        )
 
     def resolve(
         self,
@@ -55,7 +57,9 @@ class GitLabDiffPositionResolver:
             line_number, end_line = end_line, line_number
 
         for diff_file in self._files.get(file_path, []):
-            start_pos, end_pos = self._resolve_line_range(diff_file, line_number, end_line)
+            start_pos, end_pos = self._resolve_line_range(
+                diff_file, line_number, end_line
+            )
             if not start_pos or not end_pos:
                 continue
 
@@ -68,13 +72,15 @@ class GitLabDiffPositionResolver:
                 "new_path": diff_file.new_path,
             }
 
-            if line_number == end_line:
+            # Single line (requested as single, or range collapsed to one diff line)
+            if start_pos.line_code == end_pos.line_code:
                 if start_pos.old_line is not None:
                     position["old_line"] = start_pos.old_line
                 if start_pos.new_line is not None:
                     position["new_line"] = start_pos.new_line
                 return position
 
+            # Multiline range
             if end_pos.old_line is not None:
                 position["old_line"] = end_pos.old_line
             if end_pos.new_line is not None:
@@ -90,15 +96,48 @@ class GitLabDiffPositionResolver:
     def _resolve_line_range(
         self, diff_file: DiffFile, start_line: int, end_line: int
     ) -> tuple[DiffLinePosition | None, DiffLinePosition | None]:
-        start_pos = diff_file.by_new_line.get(start_line)
-        end_pos = diff_file.by_new_line.get(end_line)
-        if start_pos and end_pos:
-            return start_pos, end_pos
+        """
+        Find positions for a line range within a diff file.
 
-        start_pos = diff_file.by_old_line.get(start_line)
-        end_pos = diff_file.by_old_line.get(end_line)
-        if start_pos and end_pos:
-            return start_pos, end_pos
+        Strategy (in order of preference):
+        1. Exact match for both endpoints on the new side (added/context lines).
+        2. Exact match for both endpoints on the old side (removed/context lines).
+        3. Scan all new-side lines within [start_line, end_line] and use the
+           outermost available lines as endpoints — handles cases where the LLM
+           references a range whose exact boundaries fall outside the hunk context.
+        4. Same scan on the old side (covers comments about deleted code).
+        """
+        # 1. Exact match, new side
+        s = diff_file.by_new_line.get(start_line)
+        e = diff_file.by_new_line.get(end_line)
+        if s and e:
+            return s, e
+
+        # 2. Exact match, old side (deleted lines)
+        s = diff_file.by_old_line.get(start_line)
+        e = diff_file.by_old_line.get(end_line)
+        if s and e:
+            return s, e
+
+        # 3. Scan within range, new side
+        new_hits = sorted(
+            ln for ln in diff_file.by_new_line if start_line <= ln <= end_line
+        )
+        if new_hits:
+            return (
+                diff_file.by_new_line[new_hits[0]],
+                diff_file.by_new_line[new_hits[-1]],
+            )
+
+        # 4. Scan within range, old side
+        old_hits = sorted(
+            ln for ln in diff_file.by_old_line if start_line <= ln <= end_line
+        )
+        if old_hits:
+            return (
+                diff_file.by_old_line[old_hits[0]],
+                diff_file.by_old_line[old_hits[-1]],
+            )
 
         return None, None
 
@@ -153,27 +192,26 @@ class GitLabDiffPositionResolver:
             line_code = cls._build_line_code(code_path, old_cursor, new_cursor)
 
             if prefix == "+":
-                position = DiffLinePosition(
+                by_new_line[new_cursor] = DiffLinePosition(
                     old_line=None,
                     new_line=new_cursor,
                     line_code=line_code,
                     range_type="new",
                 )
-                by_new_line[new_cursor] = position
                 new_cursor += 1
                 continue
 
             if prefix == "-":
-                position = DiffLinePosition(
+                by_old_line[old_cursor] = DiffLinePosition(
                     old_line=old_cursor,
                     new_line=None,
                     line_code=line_code,
                     range_type="old",
                 )
-                by_old_line[old_cursor] = position
                 old_cursor += 1
                 continue
 
+            # Context line — exists on both sides with matching type per side
             by_old_line[old_cursor] = DiffLinePosition(
                 old_line=old_cursor,
                 new_line=new_cursor,
@@ -198,5 +236,7 @@ class GitLabDiffPositionResolver:
 
     @staticmethod
     def _build_line_code(path: str, old_line: int, new_line: int) -> str:
-        digest = hashlib.sha1(path.encode("utf-8"), usedforsecurity=False).hexdigest()
+        digest = hashlib.sha1(
+            path.encode("utf-8"), usedforsecurity=False
+        ).hexdigest()
         return f"{digest}_{old_line}_{new_line}"
