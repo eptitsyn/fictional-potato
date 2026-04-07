@@ -6,6 +6,7 @@ from app.langchain_integration.chains import (
     _chunk_diff_for_prompt,
     _deduplicate_comments,
     _enforce_russian_output,
+    _render_review_prompt_instructions,
     _render_review_prompt_template,
     _response_token_budget,
     _scaled_token_budget,
@@ -96,6 +97,22 @@ def test_render_review_prompt_template_keeps_diff_placeholder():
     assert "Commit SHA: abc123" in rendered
     assert "Репозиторий: repo" in rendered
     assert "{diff}" in rendered
+    assert "--- a/file.py" not in rendered
+
+
+def test_render_review_prompt_instructions_strips_diff_placeholder():
+    rendered = _render_review_prompt_instructions(
+        COMMIT_REVIEW_PROMPT,
+        {
+            "commit_sha": "abc123",
+            "repository_name": "repo",
+            "diff": "--- a/file.py\n+++ b/file.py",
+        },
+    )
+
+    assert "Commit SHA: abc123" in rendered
+    assert "Репозиторий: repo" in rendered
+    assert "{diff}" not in rendered
     assert "--- a/file.py" not in rendered
 
 

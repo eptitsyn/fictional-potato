@@ -350,5 +350,5 @@ def _format_gitlab_comment(
         f"{icon} **AI-ревью [{severity_label}]**\n\n"
         f"{location_block}"
         f"{body}\n\n"
-        f"---\n*Сгенерировано [AI Code Reviewer](https://github.com) с помощью LangGraph*"
+        f"---\n*Сгенерировано [AI Code Reviewer](https://github.com)*"
     )

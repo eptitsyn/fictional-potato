@@ -252,6 +252,11 @@ def _render_review_prompt_template(prompt_content: str, metadata: dict) -> str:
         return prompt_content
 
 
+def _render_review_prompt_instructions(prompt_content: str, metadata: dict) -> str:
+    """Render prompt metadata and remove the diff body for instruction reuse."""
+    return _render_review_prompt_template(prompt_content, metadata).replace("{diff}", "").strip()
+
+
 def _enforce_russian_output(text: str) -> str:
     text = text.strip()
     if not text:

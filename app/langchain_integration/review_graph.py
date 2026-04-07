@@ -40,6 +40,7 @@ from app.langchain_integration.chains import (
     _enforce_russian_output,
     _extract_json,
     _normalize_comment,
+    _render_review_prompt_instructions,
     _scaled_token_budget,
     _truncate_to_token_budget,
 )
@@ -127,6 +128,7 @@ async def run_review_graph(
         minimum=_MIN_PLAN_CONTEXT_TOKENS,
         maximum=_MAX_PLAN_CONTEXT_TOKENS,
     )
+    review_guidance = _render_review_prompt_instructions(review_prompt.content, metadata)
 
     plan_fixed_text = """Проанализируй этот дифф и перечисли:
 1. Какие файлы изменены и за что они отвечают
@@ -147,6 +149,9 @@ async def run_review_graph(
 Контекст плана ревью:
 {review_plan_placeholder}
 
+Дополнительные инструкции ревью:
+{review_guidance}
+
 Дифф:
 
 Верни только JSON-массив. Каждый элемент: {{"file_path": str|null, "start_line": int|null, "end_line": int|null, "severity": "info"|"warning"|"error", "comment": str}}
@@ -162,6 +167,9 @@ async def run_review_graph(
 
 Контекст плана ревью:
 {review_plan_placeholder}
+
+Дополнительные инструкции ревью:
+{review_guidance}
 
 Дифф:
 
@@ -277,6 +285,9 @@ async def _run_graph(
 Контекст плана ревью:
 {plan}
 
+Дополнительные инструкции ревью:
+{review_guidance}
+
 Дифф:
 {diff}
 
@@ -306,6 +317,9 @@ async def _run_graph(
 Контекст плана ревью:
 {plan}
 
+Дополнительные инструкции ревью:
+{review_guidance}
+
 Дифф:
 {diff}
 
@@ -334,6 +348,9 @@ async def _run_graph(
 
 Комментарии для консолидации:
 {json.dumps(all_raw, indent=2)}
+
+Дополнительные инструкции ревью:
+{review_guidance}
 
 Верни только итоговый JSON-массив. Каждый элемент: {{"file_path": str|null, "start_line": int|null, "end_line": int|null, "severity": "info"|"warning"|"error", "comment": str}}
 Все значения поля comment должны быть только на русском языке.
