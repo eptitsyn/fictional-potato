@@ -5,6 +5,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
+from app.core.network import ensure_outbound_http_policy
 from app.core.exceptions import ConflictError, NotFoundError
 from app.core.security import decrypt, encrypt
 from app.models.git_server import GitServer
@@ -43,6 +44,7 @@ async def create_git_server(db: AsyncSession, data: GitServerCreate) -> GitServe
     db.add(server)
     await db.commit()
     await db.refresh(server)
+    await ensure_outbound_http_policy(db)
     return server
 
 
@@ -66,6 +68,7 @@ async def update_git_server(
 
     await db.commit()
     await db.refresh(server)
+    await ensure_outbound_http_policy(db)
     return server
 
 
@@ -76,6 +79,7 @@ async def delete_git_server(db: AsyncSession, server_id: uuid.UUID) -> None:
 
     await db.delete(server)
     await db.commit()
+    await ensure_outbound_http_policy(db)
 
 
 async def list_projects_for_git_server(
@@ -85,6 +89,7 @@ async def list_projects_for_git_server(
     if not server.is_active:
         raise ConflictError("Git server is inactive")
 
+    await ensure_outbound_http_policy(db)
     client = GitLabClient(server.base_url, get_decrypted_access_token(server))
     try:
         projects = await client.list_projects()

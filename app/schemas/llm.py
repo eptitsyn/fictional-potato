@@ -1,7 +1,9 @@
 import uuid
 from datetime import datetime
 
-from pydantic import BaseModel, HttpUrl
+from pydantic import BaseModel, field_validator
+
+from app.core.network import validate_http_base_url
 
 
 class LLMEndpointCreate(BaseModel):
@@ -9,12 +11,24 @@ class LLMEndpointCreate(BaseModel):
     base_url: str
     api_key: str | None = None  # write-only, never returned
 
+    @field_validator("base_url")
+    @classmethod
+    def normalize_base_url(cls, value: str) -> str:
+        return validate_http_base_url(value)
+
 
 class LLMEndpointUpdate(BaseModel):
     name: str | None = None
     base_url: str | None = None
     api_key: str | None = None
     is_active: bool | None = None
+
+    @field_validator("base_url")
+    @classmethod
+    def normalize_base_url(cls, value: str | None) -> str | None:
+        if value is None:
+            return value
+        return validate_http_base_url(value)
 
 
 class LLMEndpointRead(BaseModel):

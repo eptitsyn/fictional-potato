@@ -37,6 +37,7 @@ from app.langchain_integration.chains import (
     _build_llm,
     _chunk_diff,
     _deduplicate_comments,
+    _enforce_russian_output,
     _extract_json,
     _normalize_comment,
     _scaled_token_budget,
@@ -100,9 +101,14 @@ async def run_review_graph(
     chain = llm | parser
 
     system_text = (
-        system_prompt.content
+        _enforce_russian_output(system_prompt.content)
         if system_prompt
-        else "You are an expert code reviewer. Respond ONLY with valid JSON. No prose outside JSON."
+        else (
+            "Ты опытный ревьюер кода. "
+            "Отвечай только по-русски. "
+            "Верни только корректный JSON без текста вне JSON. "
+            "Все значения поля comment должны быть только на русском языке."
+        )
     )
     graph_response_tokens = _scaled_token_budget(
         max_context_tokens=model.max_context_tokens,
@@ -117,48 +123,50 @@ async def run_review_graph(
         maximum=_MAX_PLAN_CONTEXT_TOKENS,
     )
 
-    plan_fixed_text = """Analyze this diff and list:
-1. Which files are changed and what they do
-2. Top 3-5 areas to focus the review on (security, perf, logic, style, tests)
-3. Any obvious red flags
+    plan_fixed_text = """Проанализируй этот дифф и перечисли:
+1. Какие файлы изменены и за что они отвечают
+2. Главные 3-5 направления для ревью (безопасность, производительность, логика, стиль, тесты)
+3. Явные тревожные сигналы
 
-Diff:
+Дифф:
 
-Respond with a brief plain-text analysis (not JSON)."""
+Ответь кратким текстом на русском языке, не JSON."""
     review_plan_placeholder = "x" * (plan_context_tokens * 4)
-    security_fixed_text = f"""Review ONLY for security issues:
-- Injection (SQL, command, XSS, path traversal)
-- Auth/authz flaws, missing checks
-- Secrets/credentials in code
-- Insecure deserialization or crypto
+    security_fixed_text = f"""Проведи ревью только на предмет проблем безопасности:
+- Инъекции (SQL, command, XSS, path traversal)
+- Ошибки auth/authz, отсутствующие проверки
+- Секреты и учетные данные в коде
+- Небезопасная десериализация или криптография
 - OWASP Top 10
 
-Review plan context:
+Контекст плана ревью:
 {review_plan_placeholder}
 
-Diff:
+Дифф:
 
-Respond ONLY with a JSON array. Each item: {{"file_path": str|null, "start_line": int|null, "end_line": int|null, "severity": "info"|"warning"|"error", "comment": str}}"""
-    quality_fixed_text = f"""Review for code quality, maintainability, and correctness:
-- Bugs and logic errors
-- Performance issues (N+1 queries, unnecessary loops, missing indexes)
-- Missing error handling
-- Dead code, unused variables
-- Missing or inadequate tests
-- API design issues
+Верни только JSON-массив. Каждый элемент: {{"file_path": str|null, "start_line": int|null, "end_line": int|null, "severity": "info"|"warning"|"error", "comment": str}}
+Все значения поля comment должны быть только на русском языке."""
+    quality_fixed_text = f"""Проведи ревью качества кода, поддерживаемости и корректности:
+- Баги и ошибки логики
+- Проблемы производительности (N+1 запросы, лишние циклы, отсутствующие индексы)
+- Отсутствующая обработка ошибок
+- Мертвый код и неиспользуемые переменные
+- Отсутствующие или слабые тесты
+- Проблемы дизайна API
 
-Review plan context:
+Контекст плана ревью:
 {review_plan_placeholder}
 
-Diff:
+Дифф:
 
-Respond ONLY with a JSON array. Each item: {{"file_path": str|null, "start_line": int|null, "end_line": int|null, "severity": "info"|"warning"|"error", "comment": str}}"""
+Верни только JSON-массив. Каждый элемент: {{"file_path": str|null, "start_line": int|null, "end_line": int|null, "severity": "info"|"warning"|"error", "comment": str}}
+Все значения поля comment должны быть только на русском языке."""
 
     graph_chunk_budget = min(
         _available_prompt_tokens(
             max_context_tokens=model.max_context_tokens,
             fixed_texts=[
-                "You are a senior engineer planning a code review.",
+                "Ты ведущий инженер и планируешь код-ревью. Отвечай только по-русски.",
                 plan_fixed_text,
             ],
             response_tokens=graph_response_tokens,
@@ -235,37 +243,38 @@ async def _run_graph(
     system_text = state["system_prompt"]
 
     # ── Node 1: Planning ──────────────────────────────────────────────────────
-    plan_prompt = f"""Analyze this diff and list:
-1. Which files are changed and what they do
-2. Top 3-5 areas to focus the review on (security, perf, logic, style, tests)
-3. Any obvious red flags
+    plan_prompt = f"""Проанализируй этот дифф и перечисли:
+1. Какие файлы изменены и за что они отвечают
+2. Главные 3-5 направления для ревью (безопасность, производительность, логика, стиль, тесты)
+3. Явные тревожные сигналы
 
-Diff:
+Дифф:
 {diff}
 
-Respond with a brief plain-text analysis (not JSON)."""
+Ответь кратким текстом на русском языке, не JSON."""
 
     plan = await chain.ainvoke([
-        SystemMessage(content="You are a senior engineer planning a code review."),
+        SystemMessage(content="Ты ведущий инженер и планируешь код-ревью. Отвечай только по-русски."),
         HumanMessage(content=plan_prompt),
     ])
     plan = _truncate_to_token_budget(plan, plan_context_tokens)
 
     # ── Node 2: Security Review ────────────────────────────────────────────────
-    security_prompt = f"""Review ONLY for security issues:
-- Injection (SQL, command, XSS, path traversal)
-- Auth/authz flaws, missing checks
-- Secrets/credentials in code
-- Insecure deserialization or crypto
+    security_prompt = f"""Проведи ревью только на предмет проблем безопасности:
+- Инъекции (SQL, command, XSS, path traversal)
+- Ошибки auth/authz, отсутствующие проверки
+- Секреты и учетные данные в коде
+- Небезопасная десериализация или криптография
 - OWASP Top 10
 
-Review plan context:
+Контекст плана ревью:
 {plan}
 
-Diff:
+Дифф:
 {diff}
 
-Respond ONLY with a JSON array. Each item: {{"file_path": str|null, "start_line": int|null, "end_line": int|null, "severity": "info"|"warning"|"error", "comment": str}}"""
+Верни только JSON-массив. Каждый элемент: {{"file_path": str|null, "start_line": int|null, "end_line": int|null, "severity": "info"|"warning"|"error", "comment": str}}
+Все значения поля comment должны быть только на русском языке."""
 
     sec_raw = await chain.ainvoke([
         SystemMessage(content=system_text),
@@ -278,21 +287,22 @@ Respond ONLY with a JSON array. Each item: {{"file_path": str|null, "start_line"
         security_comments = []
 
     # ── Node 3: Quality Review ─────────────────────────────────────────────────
-    quality_prompt = f"""Review for code quality, maintainability, and correctness:
-- Bugs and logic errors
-- Performance issues (N+1 queries, unnecessary loops, missing indexes)
-- Missing error handling
-- Dead code, unused variables
-- Missing or inadequate tests
-- API design issues
+    quality_prompt = f"""Проведи ревью качества кода, поддерживаемости и корректности:
+- Баги и ошибки логики
+- Проблемы производительности (N+1 запросы, лишние циклы, отсутствующие индексы)
+- Отсутствующая обработка ошибок
+- Мертвый код и неиспользуемые переменные
+- Отсутствующие или слабые тесты
+- Проблемы дизайна API
 
-Review plan context:
+Контекст плана ревью:
 {plan}
 
-Diff:
+Дифф:
 {diff}
 
-Respond ONLY with a JSON array. Each item: {{"file_path": str|null, "start_line": int|null, "end_line": int|null, "severity": "info"|"warning"|"error", "comment": str}}"""
+Верни только JSON-массив. Каждый элемент: {{"file_path": str|null, "start_line": int|null, "end_line": int|null, "severity": "info"|"warning"|"error", "comment": str}}
+Все значения поля comment должны быть только на русском языке."""
 
     qual_raw = await chain.ainvoke([
         SystemMessage(content=system_text),
@@ -309,16 +319,20 @@ Respond ONLY with a JSON array. Each item: {{"file_path": str|null, "start_line"
     if not all_raw:
         return []
 
-    consolidate_prompt = f"""You have collected these code review comments from multiple passes.
-Remove exact duplicates, merge overlapping comments about the same line or line range, and ensure severity is accurate.
-Keep all unique, actionable feedback.
+    consolidate_prompt = f"""Ты собрал комментарии код-ревью из нескольких проходов.
+Удали точные дубликаты, объедини пересекающиеся комментарии про одну и ту же строку или диапазон строк и проверь корректность severity.
+Сохрани все уникальные и практические замечания.
 
-Comments to consolidate:
+Комментарии для консолидации:
 {json.dumps(all_raw, indent=2)}
 
-Respond ONLY with the final JSON array. Each item: {{"file_path": str|null, "start_line": int|null, "end_line": int|null, "severity": "info"|"warning"|"error", "comment": str}}"""
+Верни только итоговый JSON-массив. Каждый элемент: {{"file_path": str|null, "start_line": int|null, "end_line": int|null, "severity": "info"|"warning"|"error", "comment": str}}
+Все значения поля comment должны быть только на русском языке."""
 
-    consolidation_system = "You are an expert editor consolidating code review comments. Respond ONLY with JSON."
+    consolidation_system = (
+        "Ты опытный редактор, который объединяет комментарии код-ревью. "
+        "Отвечай только по-русски и верни только JSON."
+    )
     try:
         _available_prompt_tokens(
             max_context_tokens=max_context_tokens,

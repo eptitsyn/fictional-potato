@@ -27,6 +27,12 @@ _MIN_PROMPTABLE_TOKENS = 64
 _RESPONSE_TOKENS_RATIO = 0.18
 _MIN_RESPONSE_TOKENS = 256
 _MAX_RESPONSE_TOKENS = 2048
+_RUSSIAN_OUTPUT_CONSTRAINT = textwrap.dedent("""
+    Дополнительное требование:
+    Отвечай только по-русски.
+    Верни только JSON.
+    Все значения поля comment должны быть только на русском языке.
+""").strip()
 
 
 def _build_llm(model: LLMModel, api_key: str | None) -> ChatOpenAI:
@@ -219,6 +225,13 @@ def _render_review_prompt_template(prompt_content: str, metadata: dict) -> str:
         return prompt_content
 
 
+def _enforce_russian_output(text: str) -> str:
+    text = text.strip()
+    if not text:
+        return _RUSSIAN_OUTPUT_CONSTRAINT
+    return f"{text}\n\n{_RUSSIAN_OUTPUT_CONSTRAINT}"
+
+
 async def run_review_chain(
     diff: str,
     metadata: dict,
@@ -235,13 +248,18 @@ async def run_review_chain(
     llm = _build_llm(model, api_key)
     parser = StrOutputParser()
 
-    system_text = system_prompt.content if system_prompt else textwrap.dedent("""
-        You are an expert code reviewer. Respond ONLY with a valid JSON array.
-        No markdown, no extra text, just the JSON array.
+    system_text = _enforce_russian_output(system_prompt.content) if system_prompt else textwrap.dedent("""
+        Ты опытный ревьюер кода.
+        Отвечай только по-русски.
+        Верни только корректный JSON-массив.
+        Без markdown, без пояснений вне JSON.
+        Все тексты комментариев должны быть только на русском языке.
     """).strip()
 
     # Format the review prompt with metadata
-    human_text = _render_review_prompt_template(review_prompt.content, metadata)
+    human_text = _enforce_russian_output(
+        _render_review_prompt_template(review_prompt.content, metadata)
+    )
 
     prompt_without_diff = human_text.replace("{diff}", "")
     chunks = _chunk_diff_for_prompt(
@@ -254,7 +272,7 @@ async def run_review_chain(
     for i, chunk in enumerate(chunks):
         chunk_human = human_text.replace("{diff}", chunk)
         if len(chunks) > 1:
-            chunk_human += f"\n\n[This is chunk {i+1}/{len(chunks)} of the diff]"
+            chunk_human += f"\n\n[Это фрагмент {i+1}/{len(chunks)} диффа]"
 
         messages = [
             SystemMessage(content=system_text),

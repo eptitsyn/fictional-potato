@@ -1,7 +1,9 @@
 import uuid
 from datetime import datetime
 
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
+
+from app.core.network import validate_http_base_url
 
 
 class GitServerCreate(BaseModel):
@@ -10,12 +12,24 @@ class GitServerCreate(BaseModel):
     access_token: str
     is_active: bool = True
 
+    @field_validator("base_url")
+    @classmethod
+    def normalize_base_url(cls, value: str) -> str:
+        return validate_http_base_url(value)
+
 
 class GitServerUpdate(BaseModel):
     name: str | None = None
     base_url: str | None = None
     access_token: str | None = None
     is_active: bool | None = None
+
+    @field_validator("base_url")
+    @classmethod
+    def normalize_base_url(cls, value: str | None) -> str | None:
+        if value is None:
+            return value
+        return validate_http_base_url(value)
 
 
 class GitServerRead(BaseModel):

@@ -12,32 +12,32 @@ from app.langchain_integration.chains import (
 )
 
 
-SYSTEM_PROMPT = """You are an expert code reviewer. Your job is to review code changes and provide
-constructive, actionable feedback. Focus on:
-- Correctness and potential bugs
-- Security vulnerabilities
-- Performance issues
-- Code style and maintainability
-- Test coverage
+SYSTEM_PROMPT = """Ты опытный ревьюер кода. Твоя задача — анализировать изменения в коде и давать
+конструктивную, применимую обратную связь на русском языке. Сосредоточься на:
+- корректности и возможных багах
+- уязвимостях безопасности
+- проблемах производительности
+- стиле кода и поддерживаемости
+- покрытии тестами
 
-Always be respectful and constructive. Explain WHY something is an issue, not just that it is.
-Respond ONLY with a valid JSON array of comment objects. No markdown, no explanation outside JSON."""
+Всегда пиши уважительно и по делу. Объясняй, ПОЧЕМУ это проблема, а не только то, что это проблема.
+Отвечай только корректным JSON-массивом объектов комментариев. Без markdown и без пояснений вне JSON."""
 
 
-COMMIT_REVIEW_PROMPT = """Review the following git commit diff and provide detailed code review comments.
+COMMIT_REVIEW_PROMPT = """Проведи ревью следующего git commit diff и подготовь подробные комментарии к ревью кода.
 
 Commit SHA: {commit_sha}
-Repository: {repository_name}
+Репозиторий: {repository_name}
 
-Diff:
+Дифф:
 {diff}
 
-Respond with a JSON array. Each element must have exactly these fields:
-- "file_path": string or null (path to the file)
-- "start_line": integer or null (first line number in the new file)
-- "end_line": integer or null (last line number for a continuous range; use the same value as start_line for a single line)
+Верни JSON-массив. Каждый элемент должен содержать ровно следующие поля:
+- "file_path": string или null (путь к файлу)
+- "start_line": integer или null (первая строка в новой версии файла)
+- "end_line": integer или null (последняя строка непрерывного диапазона; для одной строки укажи то же значение, что и в start_line)
 - "severity": "info" | "warning" | "error"
-- "comment": string (your review comment, be specific and actionable)
+- "comment": string (текст комментария, конкретный и применимый, только на русском языке)
 """
 
 

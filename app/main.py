@@ -1,3 +1,4 @@
+import logging
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
@@ -9,7 +10,10 @@ from pathlib import Path
 from app.api.v1.router import api_router
 from app.config import settings
 from app.core.database import AsyncSessionLocal
+from app.core.network import ensure_outbound_http_policy
 from app.services.auth_service import bootstrap_admin
+
+logger = logging.getLogger(__name__)
 
 
 @asynccontextmanager
@@ -22,6 +26,10 @@ async def lifespan(app: FastAPI):
             username=settings.FIRST_ADMIN_USERNAME,
             password=settings.FIRST_ADMIN_PASSWORD,
         )
+        try:
+            await ensure_outbound_http_policy(db)
+        except Exception:
+            logger.exception("Failed to initialize outbound HTTP policy")
     yield
 
 
