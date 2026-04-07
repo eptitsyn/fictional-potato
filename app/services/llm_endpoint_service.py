@@ -6,7 +6,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from app.core.network import ensure_outbound_http_policy, resolve_endpoint_base_url
+from app.core.network import resolve_endpoint_base_url
 from app.core.exceptions import ConflictError, NotFoundError
 from app.core.security import decrypt, encrypt
 from app.models.llm import LLMEndpoint, LLMModel
@@ -156,7 +156,6 @@ async def create_endpoint(
     db.add(ep)
     await db.commit()
     await db.refresh(ep)
-    await ensure_outbound_http_policy(db)
     return ep
 
 
@@ -171,7 +170,6 @@ async def update_endpoint(
         setattr(ep, field, value)
     await db.commit()
     await db.refresh(ep)
-    await ensure_outbound_http_policy(db)
     return ep
 
 
@@ -179,12 +177,10 @@ async def delete_endpoint(db: AsyncSession, endpoint_id: uuid.UUID) -> None:
     ep = await get_endpoint(db, endpoint_id)
     await db.delete(ep)
     await db.commit()
-    await ensure_outbound_http_policy(db)
 
 
 async def test_endpoint(db: AsyncSession, endpoint_id: uuid.UUID) -> dict:
     ep = await get_endpoint(db, endpoint_id)
-    await ensure_outbound_http_policy(db)
 
     try:
         payload = await _fetch_endpoint_models_payload(ep)
@@ -218,7 +214,6 @@ async def list_available_models_for_endpoint(
     db: AsyncSession, endpoint_id: uuid.UUID
 ) -> list[dict[str, str]]:
     endpoint = await get_endpoint(db, endpoint_id)
-    await ensure_outbound_http_policy(db)
     payload = await _fetch_endpoint_models_payload(endpoint)
     return [{"model_name": model_name} for model_name in _extract_available_model_names(payload)]
 
@@ -244,7 +239,6 @@ async def get_global_default_model(db: AsyncSession) -> LLMModel | None:
 
 async def test_model(db: AsyncSession, model_id: uuid.UUID) -> dict:
     model = await get_model(db, model_id)
-    await ensure_outbound_http_policy(db)
     resolved_base_url = resolve_endpoint_base_url(model.endpoint.base_url)
     headers = {"Content-Type": "application/json", **_build_endpoint_headers(model.endpoint)}
     payload = {

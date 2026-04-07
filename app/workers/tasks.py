@@ -44,7 +44,6 @@ async def _execute_review(job_id: uuid.UUID) -> dict:
     from sqlalchemy.orm import selectinload
 
     from app.core.database import AsyncSessionLocal
-    from app.core.network import ensure_outbound_http_policy
     from app.langchain_integration.review_graph import run_review_graph
     from app.models.llm import LLMModel
     from app.models.repository import Repository
@@ -56,7 +55,6 @@ async def _execute_review(job_id: uuid.UUID) -> dict:
     from app.services.prompt_service import resolve_effective_prompt
 
     async with AsyncSessionLocal() as db:
-        await ensure_outbound_http_policy(db)
         # Load job with all necessary relations
         result = await db.execute(
             select(ReviewJob)
