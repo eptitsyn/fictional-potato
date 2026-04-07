@@ -83,6 +83,7 @@ class ReviewComment(Base):
     )
     file_path: Mapped[str | None] = mapped_column(String(1000), nullable=True)
     line_number: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    line_end: Mapped[int | None] = mapped_column(Integer, nullable=True)
     comment_body: Mapped[str] = mapped_column(Text, nullable=False)
     severity: Mapped[str] = mapped_column(
         Enum("info", "warning", "error", name="severity_enum"),

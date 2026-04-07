@@ -24,6 +24,18 @@ class GitLabClient:
             )
         return r.json()
 
+    async def _get_with_response(
+        self, path: str, params: dict | None = None
+    ) -> tuple[dict | list, httpx.Response]:
+        url = f"{self._base}/api/v4{path}"
+        async with httpx.AsyncClient(timeout=30) as client:
+            r = await client.get(url, headers=self._headers, params=params)
+        if not r.is_success:
+            raise GitLabServiceError(
+                f"GitLab GET {path} failed: {r.status_code} {r.text[:200]}"
+            )
+        return r.json(), r
+
     async def _post(self, path: str, json: dict) -> dict:
         url = f"{self._base}/api/v4{path}"
         async with httpx.AsyncClient(timeout=30) as client:
@@ -39,9 +51,40 @@ class GitLabClient:
     async def get_commit(self, project_id: int, sha: str) -> dict:
         return await self._get(f"/projects/{project_id}/repository/commits/{sha}")
 
+    async def list_projects(self) -> list[dict]:
+        projects: list[dict] = []
+        page = 1
+
+        while True:
+            payload, response = await self._get_with_response(
+                "/projects",
+                params={
+                    "membership": True,
+                    "simple": True,
+                    "archived": False,
+                    "order_by": "path",
+                    "sort": "asc",
+                    "per_page": 100,
+                    "page": page,
+                },
+            )
+            if not isinstance(payload, list):
+                break
+
+            projects.extend(item for item in payload if isinstance(item, dict))
+            next_page = response.headers.get("X-Next-Page")
+            if not next_page:
+                break
+            page = int(next_page)
+
+        return projects
+
     async def get_commit_diff(self, project_id: int, sha: str) -> str:
+        return _format_diff(await self.get_commit_diff_entries(project_id, sha))
+
+    async def get_commit_diff_entries(self, project_id: int, sha: str) -> list[dict]:
         data = await self._get(f"/projects/{project_id}/repository/commits/{sha}/diff")
-        return _format_diff(data)
+        return data if isinstance(data, list) else []
 
     async def post_commit_comment(
         self,
@@ -60,17 +103,35 @@ class GitLabClient:
             body["line_type"] = line_type
         return await self._post(f"/projects/{project_id}/repository/commits/{sha}/comments", body)
 
+    async def post_commit_discussion(
+        self,
+        project_id: int,
+        sha: str,
+        body: str,
+        position: dict | None = None,
+    ) -> dict:
+        payload: dict = {"body": body}
+        if position:
+            payload["position"] = position
+        return await self._post(
+            f"/projects/{project_id}/repository/commits/{sha}/discussions",
+            payload,
+        )
+
     # ── Merge Request ───────────────────────────────────────────────────────
 
     async def get_mr(self, project_id: int, mr_iid: int) -> dict:
         return await self._get(f"/projects/{project_id}/merge_requests/{mr_iid}")
 
     async def get_mr_changes(self, project_id: int, mr_iid: int) -> str:
+        data = await self.get_mr_changes_payload(project_id, mr_iid)
+        return _format_diff(data.get("changes", []))
+
+    async def get_mr_changes_payload(self, project_id: int, mr_iid: int) -> dict:
         data = await self._get(
             f"/projects/{project_id}/merge_requests/{mr_iid}/changes"
         )
-        changes = data.get("changes", [])
-        return _format_diff(changes)
+        return data if isinstance(data, dict) else {}
 
     async def post_mr_note(self, project_id: int, mr_iid: int, body: str) -> dict:
         return await self._post(

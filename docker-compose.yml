@@ -40,6 +40,8 @@ services:
     build: .
     ports:
       - "${APP_PORT:-8000}:8000"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     depends_on:
       migrate:
         condition: service_completed_successfully
@@ -50,6 +52,8 @@ services:
   worker:
     <<: *service-defaults
     build: .
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     depends_on:
       migrate:
         condition: service_completed_successfully

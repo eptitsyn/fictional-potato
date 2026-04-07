@@ -33,7 +33,7 @@ from langchain_openai import ChatOpenAI
 from langgraph.graph import END, START, StateGraph
 
 from app.core.exceptions import LLMServiceError
-from app.langchain_integration.chains import _build_llm, _chunk_diff, _extract_json
+from app.langchain_integration.chains import _build_llm, _chunk_diff, _extract_json, _normalize_comment
 from app.models.llm import LLMModel
 from app.models.prompt import Prompt
 
@@ -159,7 +159,7 @@ Review plan context:
 Diff:
 {diff}
 
-Respond ONLY with a JSON array. Each item: {{"file_path": str|null, "line_number": int|null, "severity": "info"|"warning"|"error", "comment": str}}"""
+Respond ONLY with a JSON array. Each item: {{"file_path": str|null, "start_line": int|null, "end_line": int|null, "severity": "info"|"warning"|"error", "comment": str}}"""
 
     sec_raw = await chain.ainvoke([
         SystemMessage(content=system_text),
@@ -186,7 +186,7 @@ Review plan context:
 Diff:
 {diff}
 
-Respond ONLY with a JSON array. Each item: {{"file_path": str|null, "line_number": int|null, "severity": "info"|"warning"|"error", "comment": str}}"""
+Respond ONLY with a JSON array. Each item: {{"file_path": str|null, "start_line": int|null, "end_line": int|null, "severity": "info"|"warning"|"error", "comment": str}}"""
 
     qual_raw = await chain.ainvoke([
         SystemMessage(content=system_text),
@@ -204,13 +204,13 @@ Respond ONLY with a JSON array. Each item: {{"file_path": str|null, "line_number
         return []
 
     consolidate_prompt = f"""You have collected these code review comments from multiple passes.
-Remove exact duplicates, merge overlapping comments about the same line, and ensure severity is accurate.
+Remove exact duplicates, merge overlapping comments about the same line or line range, and ensure severity is accurate.
 Keep all unique, actionable feedback.
 
 Comments to consolidate:
 {json.dumps(all_raw, indent=2)}
 
-Respond ONLY with the final JSON array. Each item: {{"file_path": str|null, "line_number": int|null, "severity": "info"|"warning"|"error", "comment": str}}"""
+Respond ONLY with the final JSON array. Each item: {{"file_path": str|null, "start_line": int|null, "end_line": int|null, "severity": "info"|"warning"|"error", "comment": str}}"""
 
     final_raw = await chain.ainvoke([
         SystemMessage(content="You are an expert editor consolidating code review comments. Respond ONLY with JSON."),
@@ -228,11 +228,6 @@ Respond ONLY with the final JSON array. Each item: {{"file_path": str|null, "lin
         sev = c.get("severity", "info")
         if sev not in ("info", "warning", "error"):
             sev = "info"
-        normalized.append({
-            "file_path": c.get("file_path"),
-            "line_number": c.get("line_number"),
-            "severity": sev,
-            "comment_body": c.get("comment", c.get("comment_body", "")),
-        })
+        normalized.append(_normalize_comment({**c, "severity": sev}))
 
     return normalized

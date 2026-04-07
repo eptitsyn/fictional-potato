@@ -170,12 +170,12 @@
     <p>Sign in to manage your configuration</p>
     <div id="login-error" class="alert alert-error hidden"></div>
     <div class="form-group">
-      <label>Username or Email</label>
-      <input id="login-username" type="text" placeholder="admin" autofocus>
+      <label for="login-username">Username or Email</label>
+      <input id="login-username" name="username" type="text" placeholder="admin" autocomplete="username" autofocus>
     </div>
     <div class="form-group">
-      <label>Password</label>
-      <input id="login-password" type="password" placeholder="••••••••">
+      <label for="login-password">Password</label>
+      <input id="login-password" name="password" type="password" placeholder="••••••••" autocomplete="current-password">
     </div>
     <button class="btn btn-primary" style="width:100%" onclick="doLogin()">Sign In</button>
   </div>
@@ -189,6 +189,7 @@
       <a onclick="showPage('dashboard')" class="active"><span class="icon">📊</span> Dashboard</a>
       <a onclick="showPage('endpoints')"><span class="icon">🔌</span> LLM Endpoints</a>
       <a onclick="showPage('models')"><span class="icon">🧠</span> LLM Models</a>
+      <a onclick="showPage('git-servers')"><span class="icon">🦊</span> Git Servers</a>
       <a onclick="showPage('repositories')"><span class="icon">📁</span> Repositories</a>
       <a onclick="showPage('users')"><span class="icon">👥</span> Users</a>
       <a onclick="showPage('prompts')"><span class="icon">💬</span> Prompts</a>
@@ -245,6 +246,20 @@
         </div>
       </div>
 
+      <!-- GIT SERVERS -->
+      <div id="page-git-servers" class="page">
+        <div class="toolbar">
+          <h2>Git Servers</h2>
+          <button class="btn btn-primary" onclick="openGitServerModal()">+ Add Git Server</button>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>Name</th><th>Base URL</th><th>Status</th><th>Actions</th></tr></thead>
+            <tbody id="git-servers-body"></tbody>
+          </table>
+        </div>
+      </div>
+
       <!-- REPOSITORIES -->
       <div id="page-repositories" class="page">
         <div class="toolbar">
@@ -253,7 +268,7 @@
         </div>
         <div class="table-wrap">
           <table>
-            <thead><tr><th>Name</th><th>GitLab ID</th><th>Commits</th><th>MRs</th><th>Status</th><th>Actions</th></tr></thead>
+            <thead><tr><th>Name</th><th>Git Server</th><th>GitLab ID</th><th>Commits</th><th>MRs</th><th>Status</th><th>Actions</th></tr></thead>
             <tbody id="repos-body"></tbody>
           </table>
         </div>
@@ -336,10 +351,10 @@
   <div class="modal">
     <h2 id="endpoint-modal-title">Add LLM Endpoint</h2>
     <div id="endpoint-error" class="alert alert-error hidden"></div>
-    <div class="form-group"><label>Name</label><input id="ep-name" placeholder="OpenAI, Ollama local..."></div>
-    <div class="form-group"><label>Base URL</label><input id="ep-url" placeholder="https://api.openai.com/v1"></div>
-    <div class="form-group"><label>API Key (leave blank to keep existing)</label><input id="ep-key" type="password" placeholder="sk-..."></div>
-    <div class="form-group"><label>Status</label><select id="ep-active"><option value="true">Active</option><option value="false">Inactive</option></select></div>
+    <div class="form-group"><label for="ep-name">Name</label><input id="ep-name" name="endpoint_name" autocomplete="off" placeholder="OpenAI, Ollama local..."></div>
+    <div class="form-group"><label for="ep-url">Base URL</label><input id="ep-url" name="endpoint_url" type="url" inputmode="url" autocomplete="url" placeholder="https://api.openai.com/v1"></div>
+    <div class="form-group"><label for="ep-key">API Key (leave blank to keep existing)</label><input id="ep-key" name="endpoint_api_key" type="password" autocomplete="new-password" placeholder="sk-..."></div>
+    <div class="form-group"><label for="ep-active">Status</label><select id="ep-active" name="endpoint_active"><option value="true">Active</option><option value="false">Inactive</option></select></div>
     <div class="modal-actions">
       <button class="btn btn-secondary" onclick="closeModal('modal-endpoint')">Cancel</button>
       <button class="btn btn-primary" onclick="saveEndpoint()">Save</button>
@@ -352,15 +367,38 @@
   <div class="modal">
     <h2 id="model-modal-title">Add LLM Model</h2>
     <div id="model-error" class="alert alert-error hidden"></div>
-    <div class="form-group"><label>Endpoint</label><select id="m-endpoint"></select></div>
-    <div class="form-group"><label>Model Name</label><input id="m-name" placeholder="gpt-4o, llama3, mistral-large..."></div>
-    <div class="form-group"><label>Display Name</label><input id="m-display" placeholder="Optional friendly name"></div>
-    <div class="form-group"><label>Max Context Tokens</label><input id="m-tokens" type="number" value="8192"></div>
-    <div class="form-group"><label>Temperature</label><input id="m-temp" type="number" step="0.1" min="0" max="2" value="0.2"></div>
-    <div class="form-group"><label>Global Default?</label><select id="m-default"><option value="false">No</option><option value="true">Yes</option></select></div>
+    <div class="form-group"><label for="m-endpoint">Endpoint</label><select id="m-endpoint" name="model_endpoint" onchange="loadAvailableModelsForModelModal()"></select></div>
+    <div class="form-group">
+      <div style="display:flex;align-items:center;justify-content:space-between;gap:12px">
+        <label for="m-name" style="margin:0">Model Name</label>
+        <button type="button" class="btn btn-sm btn-secondary" onclick="loadAvailableModelsForModelModal()">Refresh</button>
+      </div>
+      <select id="m-name" name="model_name"></select>
+      <small id="m-name-help" style="display:block;margin-top:6px;color:var(--text-muted)">Available models load from the selected endpoint.</small>
+    </div>
+    <div class="form-group"><label for="m-display">Display Name</label><input id="m-display" name="model_display_name" autocomplete="off" placeholder="Optional friendly name"></div>
+    <div class="form-group"><label for="m-tokens">Max Context Tokens</label><input id="m-tokens" name="model_max_context_tokens" type="number" inputmode="numeric" autocomplete="off" value="8192"></div>
+    <div class="form-group"><label for="m-temp">Temperature</label><input id="m-temp" name="model_temperature" type="number" step="0.1" min="0" max="2" autocomplete="off" value="0.2"></div>
+    <div class="form-group"><label for="m-default">Global Default?</label><select id="m-default" name="model_is_default"><option value="false">No</option><option value="true">Yes</option></select></div>
     <div class="modal-actions">
       <button class="btn btn-secondary" onclick="closeModal('modal-model')">Cancel</button>
       <button class="btn btn-primary" onclick="saveModel()">Save</button>
+    </div>
+  </div>
+</div>
+
+<!-- Git Server Modal -->
+<div id="modal-git-server" class="modal-overlay hidden">
+  <div class="modal">
+    <h2 id="git-server-modal-title">Add Git Server</h2>
+    <div id="git-server-error" class="alert alert-error hidden"></div>
+    <div class="form-group"><label for="gs-name">Name</label><input id="gs-name" name="git_server_name" autocomplete="off" placeholder="GitLab.com, Internal GitLab..."></div>
+    <div class="form-group"><label for="gs-url">Base URL</label><input id="gs-url" name="git_server_url" type="url" inputmode="url" autocomplete="url" placeholder="https://gitlab.com"></div>
+    <div class="form-group"><label for="gs-token">Access Token (leave blank to keep existing)</label><input id="gs-token" name="git_server_token" type="password" autocomplete="new-password" placeholder="glpat-..."></div>
+    <div class="form-group"><label for="gs-active">Status</label><select id="gs-active" name="git_server_active"><option value="true">Active</option><option value="false">Inactive</option></select></div>
+    <div class="modal-actions">
+      <button class="btn btn-secondary" onclick="closeModal('modal-git-server')">Cancel</button>
+      <button class="btn btn-primary" onclick="saveGitServer()">Save</button>
     </div>
   </div>
 </div>
@@ -370,14 +408,19 @@
   <div class="modal">
     <h2 id="repo-modal-title">Add Repository</h2>
     <div id="repo-error" class="alert alert-error hidden"></div>
-    <div class="form-group"><label>GitLab Project ID</label><input id="r-pid" type="number" placeholder="12345"></div>
-    <div class="form-group"><label>Name</label><input id="r-name" placeholder="my-org/my-repo"></div>
-    <div class="form-group"><label>GitLab Instance URL</label><input id="r-url" placeholder="https://gitlab.com"></div>
-    <div class="form-group"><label>GitLab Access Token</label><input id="r-token" type="password" placeholder="glpat-..."></div>
-    <div class="form-group"><label>Webhook Secret</label><input id="r-secret" type="password" placeholder="random secret string"></div>
-    <div class="form-group"><label>LLM Model (leave blank = global default)</label><select id="r-model"><option value="">Global default</option></select></div>
-    <div class="form-group"><label>Review Commits</label><select id="r-commits"><option value="true">Yes</option><option value="false">No</option></select></div>
-    <div class="form-group"><label>Review Merge Requests</label><select id="r-mrs"><option value="true">Yes</option><option value="false">No</option></select></div>
+    <div class="form-group"><label for="r-server">Git Server</label><select id="r-server" name="repository_git_server" onchange="loadServerProjectsForRepoModal()"></select></div>
+    <div class="form-group">
+      <div style="display:flex;align-items:center;justify-content:space-between;gap:12px">
+        <label for="r-project" style="margin:0">Repository</label>
+        <button type="button" class="btn btn-sm btn-secondary" onclick="loadServerProjectsForRepoModal(true)">Refresh</button>
+      </div>
+      <select id="r-project" name="repository_project"></select>
+      <small id="r-project-help" style="display:block;margin-top:6px;color:var(--text-muted)">Select a git server to load accessible projects.</small>
+    </div>
+    <div class="form-group"><label for="r-secret">Webhook Secret</label><input id="r-secret" name="repository_webhook_secret" type="password" autocomplete="new-password" placeholder="random secret string"></div>
+    <div class="form-group"><label for="r-model">LLM Model (leave blank = global default)</label><select id="r-model" name="repository_llm_model"><option value="">Global default</option></select></div>
+    <div class="form-group"><label for="r-commits">Review Commits</label><select id="r-commits" name="repository_review_commits"><option value="true">Yes</option><option value="false">No</option></select></div>
+    <div class="form-group"><label for="r-mrs">Review Merge Requests</label><select id="r-mrs" name="repository_review_mrs"><option value="true">Yes</option><option value="false">No</option></select></div>
     <div class="modal-actions">
       <button class="btn btn-secondary" onclick="closeModal('modal-repo')">Cancel</button>
       <button class="btn btn-primary" onclick="saveRepo()">Save</button>
@@ -390,10 +433,10 @@
   <div class="modal">
     <h2 id="user-modal-title">Add User</h2>
     <div id="user-error" class="alert alert-error hidden"></div>
-    <div class="form-group"><label>Username</label><input id="u-username" placeholder="jsmith"></div>
-    <div class="form-group"><label>Email</label><input id="u-email" type="email" placeholder="j@example.com"></div>
-    <div class="form-group"><label>Password</label><input id="u-pass" type="password" placeholder="(leave blank to keep)"></div>
-    <div class="form-group"><label>Role</label><select id="u-role"><option value="viewer">Viewer</option><option value="reviewer">Reviewer</option><option value="admin">Admin</option></select></div>
+    <div class="form-group"><label for="u-username">Username</label><input id="u-username" name="user_username" autocomplete="username" placeholder="jsmith"></div>
+    <div class="form-group"><label for="u-email">Email</label><input id="u-email" name="user_email" type="email" autocomplete="email" placeholder="j@example.com"></div>
+    <div class="form-group"><label for="u-pass">Password</label><input id="u-pass" name="user_password" type="password" autocomplete="new-password" placeholder="(leave blank to keep)"></div>
+    <div class="form-group"><label for="u-role">Role</label><select id="u-role" name="user_role"><option value="viewer">Viewer</option><option value="reviewer">Reviewer</option><option value="admin">Admin</option></select></div>
     <div class="modal-actions">
       <button class="btn btn-secondary" onclick="closeModal('modal-user')">Cancel</button>
       <button class="btn btn-primary" onclick="saveUser()">Save</button>
@@ -406,10 +449,10 @@
   <div class="modal">
     <h2 id="prompt-modal-title">Add Prompt</h2>
     <div id="prompt-error" class="alert alert-error hidden"></div>
-    <div class="form-group"><label>Name</label><input id="p-name" placeholder="My review prompt"></div>
-    <div class="form-group"><label>Type</label><select id="p-type"><option value="system">System</option><option value="commit_review">Commit Review</option><option value="mr_review">MR Review</option></select></div>
-    <div class="form-group"><label>Content</label><textarea id="p-content" rows="10" placeholder="Use {diff}, {commit_sha}, {mr_title} etc as placeholders"></textarea></div>
-    <div class="form-group"><label>Set as Global Default?</label><select id="p-default"><option value="false">No</option><option value="true">Yes (admin only)</option></select></div>
+    <div class="form-group"><label for="p-name">Name</label><input id="p-name" name="prompt_name" autocomplete="off" placeholder="My review prompt"></div>
+    <div class="form-group"><label for="p-type">Type</label><select id="p-type" name="prompt_type"><option value="system">System</option><option value="commit_review">Commit Review</option><option value="mr_review">MR Review</option></select></div>
+    <div class="form-group"><label for="p-content">Content</label><textarea id="p-content" name="prompt_content" rows="10" autocomplete="off" placeholder="Use {diff}, {commit_sha}, {mr_title} etc as placeholders"></textarea></div>
+    <div class="form-group"><label for="p-default">Set as Global Default?</label><select id="p-default" name="prompt_is_default"><option value="false">No</option><option value="true">Yes (admin only)</option></select></div>
     <div class="modal-actions">
       <button class="btn btn-secondary" onclick="closeModal('modal-prompt')">Cancel</button>
       <button class="btn btn-primary" onclick="savePrompt()">Save</button>
@@ -422,10 +465,10 @@
   <div class="modal">
     <h2>Trigger Review</h2>
     <div id="trigger-error" class="alert alert-error hidden"></div>
-    <div class="form-group"><label>Repository</label><select id="tr-repo"></select></div>
-    <div class="form-group"><label>Type</label><select id="tr-type" onchange="updateTriggerFields()"><option value="commit">Commit</option><option value="mr">Merge Request</option></select></div>
-    <div class="form-group" id="tr-sha-group"><label>Commit SHA</label><input id="tr-sha" placeholder="abc123..."></div>
-    <div class="form-group hidden" id="tr-mr-group"><label>MR IID</label><input id="tr-mr" type="number" placeholder="42"></div>
+    <div class="form-group"><label for="tr-repo">Repository</label><select id="tr-repo" name="trigger_repository"></select></div>
+    <div class="form-group"><label for="tr-type">Type</label><select id="tr-type" name="trigger_type" onchange="updateTriggerFields()"><option value="commit">Commit</option><option value="mr">Merge Request</option></select></div>
+    <div class="form-group" id="tr-sha-group"><label for="tr-sha">Commit SHA</label><input id="tr-sha" name="trigger_commit_sha" autocomplete="off" placeholder="abc123..."></div>
+    <div class="form-group hidden" id="tr-mr-group"><label for="tr-mr">MR IID</label><input id="tr-mr" name="trigger_mr_iid" type="number" inputmode="numeric" autocomplete="off" placeholder="42"></div>
     <div class="modal-actions">
       <button class="btn btn-secondary" onclick="closeModal('modal-trigger')">Cancel</button>
       <button class="btn btn-primary" onclick="saveTrigger()">Trigger</button>
@@ -451,7 +494,9 @@ let currentUser = null;
 let editingId = null;
 let allEndpoints = [];
 let allModels = [];
+let allGitServers = [];
 let allRepos = [];
+let repoProjectsByServer = {};
 
 // ── API ────────────────────────────────────────────────────────────────────────
 async function api(method, path, body) {
@@ -459,7 +504,11 @@ async function api(method, path, body) {
   if (token) opts.headers['Authorization'] = `Bearer ${token}`;
   if (body !== undefined) opts.body = JSON.stringify(body);
   const r = await fetch('/api/v1' + path, opts);
-  if (r.status === 401) { doLogout(); return null; }
+  if (r.status === 401) {
+    const err = await r.json().catch(() => ({ detail: 'Not authenticated' }));
+    if (path !== '/auth/token') doLogout();
+    throw new Error(err.detail || 'Not authenticated');
+  }
   if (!r.ok) {
     const err = await r.json().catch(() => ({ detail: r.statusText }));
     throw new Error(err.detail || JSON.stringify(err));
@@ -476,6 +525,9 @@ async function doLogin() {
   errEl.classList.add('hidden');
   try {
     const data = await api('POST', '/auth/token', { username, password });
+    if (!data || !data.access_token) {
+      throw new Error('Login failed: missing access token in response');
+    }
     token = data.access_token;
     localStorage.setItem('token', token);
     await initApp();
@@ -517,11 +569,11 @@ async function initApp() {
 // ── Pages ──────────────────────────────────────────────────────────────────────
 const pageTitles = {
   dashboard: 'Dashboard', endpoints: 'LLM Endpoints', models: 'LLM Models',
-  repositories: 'Repositories', users: 'Users', prompts: 'Prompts', reviews: 'Review Jobs',
+  'git-servers': 'Git Servers', repositories: 'Repositories', users: 'Users', prompts: 'Prompts', reviews: 'Review Jobs',
   workers: 'Worker Status',
 };
 
-function showPage(name) {
+function renderPage(name) {
   document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
   document.getElementById('page-' + name).classList.add('active');
   document.querySelectorAll('#sidebar nav a').forEach(a => a.classList.remove('active'));
@@ -536,6 +588,7 @@ async function loadPage(name) {
   if (name === 'dashboard') await loadDashboard();
   else if (name === 'endpoints') await loadEndpoints();
   else if (name === 'models') await loadModels();
+  else if (name === 'git-servers') await loadGitServers();
   else if (name === 'repositories') await loadRepos();
   else if (name === 'users') await loadUsers();
   else if (name === 'prompts') await loadPrompts();
@@ -545,14 +598,16 @@ async function loadPage(name) {
 
 // ── Dashboard ──────────────────────────────────────────────────────────────────
 async function loadDashboard() {
-  const [jobs, repos, eps] = await Promise.all([
+  const [jobs, repos, eps, gitServers] = await Promise.all([
     api('GET', '/reviews').catch(() => []),
     api('GET', '/repositories').catch(() => []),
     api('GET', '/llm-endpoints').catch(() => []),
+    api('GET', '/git-servers').catch(() => []),
   ]);
   const completed = (jobs||[]).filter(j => j.status === 'completed').length;
   const failed = (jobs||[]).filter(j => j.status === 'failed').length;
   document.getElementById('dash-stats').innerHTML = `
+    <div class="stat-card"><div class="val">${(gitServers||[]).length}</div><div class="lbl">Git Servers</div></div>
     <div class="stat-card"><div class="val">${(repos||[]).length}</div><div class="lbl">Repositories</div></div>
     <div class="stat-card"><div class="val">${(eps||[]).length}</div><div class="lbl">LLM Endpoints</div></div>
     <div class="stat-card"><div class="val">${(jobs||[]).length}</div><div class="lbl">Total Reviews</div></div>
@@ -652,6 +707,7 @@ async function loadModels() {
       <td>${m.is_global_default ? '<span class="badge badge-admin">Default</span>' : '—'}</td>
       <td><span class="badge badge-${m.is_active ? 'active' : 'inactive'}">${m.is_active ? 'Active' : 'Inactive'}</span></td>
       <td>
+        <button class="btn btn-sm btn-secondary" onclick="testModel('${m.id}')">Test</button>
         <button class="btn btn-sm btn-secondary" onclick="editModel('${m.id}')">Edit</button>
         <button class="btn btn-sm btn-danger" onclick="deleteModel('${m.id}')">Delete</button>
       </td>
@@ -659,20 +715,109 @@ async function loadModels() {
   `).join('') || '<tr><td colspan="7" style="color:var(--text-muted);text-align:center">No models yet</td></tr>';
 }
 
+async function loadAvailableModelsForModelModal(selectedModelName = '') {
+  const errEl = document.getElementById('model-error');
+  const endpointId = document.getElementById('m-endpoint').value;
+  const select = document.getElementById('m-name');
+  const help = document.getElementById('m-name-help');
+  const previousValue = select.value;
+
+  errEl.classList.add('hidden');
+  select.replaceChildren();
+
+  if (!endpointId) {
+    help.textContent = 'Select an endpoint first.';
+    return;
+  }
+
+  help.textContent = 'Loading available models from endpoint...';
+  select.disabled = true;
+
+  try {
+    const availableModels = await api('GET', `/llm-endpoints/${endpointId}/available-models`) || [];
+    if (!availableModels.length) {
+      help.textContent = 'This endpoint did not return any models.';
+      const option = document.createElement('option');
+      option.value = '';
+      option.textContent = 'No models found';
+      select.appendChild(option);
+      return;
+    }
+
+    const selectedName = selectedModelName || previousValue || '';
+    availableModels.forEach(model => {
+      const option = document.createElement('option');
+      option.value = model.model_name;
+      option.textContent = model.model_name;
+      option.selected = option.value === selectedName;
+      select.appendChild(option);
+    });
+
+    if (!selectedName) {
+      select.value = availableModels[0].model_name;
+    } else if (!Array.from(select.options).some(option => option.value === selectedName)) {
+      const option = document.createElement('option');
+      option.value = selectedName;
+      option.textContent = `${selectedName} (saved)`;
+      option.selected = true;
+      select.appendChild(option);
+    }
+
+    help.textContent = `Loaded ${availableModels.length} model${availableModels.length === 1 ? '' : 's'} from the endpoint.`;
+  } catch (e) {
+    help.textContent = 'Unable to load models from the selected endpoint.';
+    errEl.textContent = e.message;
+    errEl.classList.remove('hidden');
+    const option = document.createElement('option');
+    option.value = selectedModelName || '';
+    option.textContent = selectedModelName || 'Unable to load models';
+    select.appendChild(option);
+  } finally {
+    select.disabled = false;
+  }
+}
+
 async function openModelModal(id) {
   editingId = id || null;
   document.getElementById('model-modal-title').textContent = id ? 'Edit Model' : 'Add Model';
-  document.getElementById('model-error').classList.add('hidden');
+  const errEl = document.getElementById('model-error');
+  errEl.classList.add('hidden');
+  allEndpoints = allEndpoints.length ? allEndpoints : await api('GET', '/llm-endpoints').catch(() => []);
+  if (!allEndpoints.length) {
+    errEl.textContent = 'Add an endpoint before creating a model.';
+    errEl.classList.remove('hidden');
+    document.getElementById('modal-model').classList.remove('hidden');
+    return;
+  }
+
   const sel = document.getElementById('m-endpoint');
-  sel.innerHTML = allEndpoints.map(e => `<option value="${e.id}">${e.name}</option>`).join('');
-  if (!id) { document.getElementById('m-name').value=''; document.getElementById('m-display').value=''; document.getElementById('m-tokens').value=8192; document.getElementById('m-temp').value=0.2; document.getElementById('m-default').value='false'; }
+  sel.replaceChildren();
+  allEndpoints.forEach(endpoint => {
+    const option = document.createElement('option');
+    option.value = endpoint.id;
+    option.textContent = endpoint.name;
+    sel.appendChild(option);
+  });
+
+  if (!id) {
+    document.getElementById('m-name').replaceChildren();
+    document.getElementById('m-display').value = '';
+    document.getElementById('m-tokens').value = 8192;
+    document.getElementById('m-temp').value = 0.2;
+    document.getElementById('m-default').value = 'false';
+    sel.disabled = false;
+  }
+
   document.getElementById('modal-model').classList.remove('hidden');
+  await loadAvailableModelsForModelModal();
 }
 
 async function editModel(id) {
   const m = allModels.find(m => m.id === id);
   await openModelModal(id);
   document.getElementById('m-endpoint').value = m.endpoint_id;
+  document.getElementById('m-endpoint').disabled = true;
+  await loadAvailableModelsForModelModal(m.model_name);
   document.getElementById('m-name').value = m.model_name;
   document.getElementById('m-display').value = m.display_name || '';
   document.getElementById('m-tokens').value = m.max_context_tokens;
@@ -685,12 +830,17 @@ async function saveModel() {
   errEl.classList.add('hidden');
   const endpointId = document.getElementById('m-endpoint').value;
   const body = {
-    model_name: document.getElementById('m-name').value,
+    model_name: document.getElementById('m-name').value.trim(),
     display_name: document.getElementById('m-display').value || null,
     max_context_tokens: parseInt(document.getElementById('m-tokens').value),
     temperature: parseFloat(document.getElementById('m-temp').value),
     is_global_default: document.getElementById('m-default').value === 'true',
   };
+  if (!body.model_name) {
+    errEl.textContent = 'Select a model name.';
+    errEl.classList.remove('hidden');
+    return;
+  }
   try {
     if (editingId) await api('PUT', `/llm-models/${editingId}`, body);
     else await api('POST', `/llm-endpoints/${endpointId}/models`, body);
@@ -699,19 +849,98 @@ async function saveModel() {
   } catch(e) { errEl.textContent = e.message; errEl.classList.remove('hidden'); }
 }
 
+async function testModel(id) {
+  const result = await api('POST', `/llm-models/${id}/test`).catch(e => ({ status: 'error', detail: e.message }));
+  alert(JSON.stringify(result, null, 2));
+}
+
 async function deleteModel(id) {
   if (!confirm('Delete this model?')) return;
   await api('DELETE', `/llm-models/${id}`);
   loadModels();
 }
 
+// ── Git Servers ───────────────────────────────────────────────────────────────
+async function loadGitServers() {
+  allGitServers = await api('GET', '/git-servers') || [];
+  document.getElementById('git-servers-body').innerHTML = allGitServers.map(server => `
+    <tr>
+      <td>${server.name}</td>
+      <td><code>${server.base_url}</code></td>
+      <td><span class="badge badge-${server.is_active ? 'active' : 'inactive'}">${server.is_active ? 'Active' : 'Inactive'}</span></td>
+      <td>
+        <button class="btn btn-sm btn-secondary" onclick="editGitServer('${server.id}')">Edit</button>
+        <button class="btn btn-sm btn-danger" onclick="deleteGitServer('${server.id}')">Delete</button>
+      </td>
+    </tr>
+  `).join('') || '<tr><td colspan="4" style="color:var(--text-muted);text-align:center">No git servers yet</td></tr>';
+}
+
+function openGitServerModal(id) {
+  editingId = id || null;
+  document.getElementById('git-server-modal-title').textContent = id ? 'Edit Git Server' : 'Add Git Server';
+  document.getElementById('git-server-error').classList.add('hidden');
+  if (!id) {
+    document.getElementById('gs-name').value = '';
+    document.getElementById('gs-url').value = '';
+    document.getElementById('gs-token').value = '';
+    document.getElementById('gs-active').value = 'true';
+  }
+  document.getElementById('modal-git-server').classList.remove('hidden');
+}
+
+async function editGitServer(id) {
+  const server = allGitServers.find(item => item.id === id);
+  document.getElementById('gs-name').value = server.name;
+  document.getElementById('gs-url').value = server.base_url;
+  document.getElementById('gs-token').value = '';
+  document.getElementById('gs-active').value = String(server.is_active);
+  openGitServerModal(id);
+}
+
+async function saveGitServer() {
+  const errEl = document.getElementById('git-server-error');
+  errEl.classList.add('hidden');
+  const body = {
+    name: document.getElementById('gs-name').value.trim(),
+    base_url: document.getElementById('gs-url').value.trim(),
+    is_active: document.getElementById('gs-active').value === 'true',
+  };
+  const tokenValue = document.getElementById('gs-token').value;
+  if (tokenValue) body.access_token = tokenValue;
+  if (!editingId && !tokenValue) {
+    errEl.textContent = 'Access token required';
+    errEl.classList.remove('hidden');
+    return;
+  }
+  try {
+    if (editingId) await api('PUT', `/git-servers/${editingId}`, body);
+    else await api('POST', '/git-servers', body);
+    repoProjectsByServer = {};
+    closeModal('modal-git-server');
+    loadGitServers();
+  } catch (e) {
+    errEl.textContent = e.message;
+    errEl.classList.remove('hidden');
+  }
+}
+
+async function deleteGitServer(id) {
+  if (!confirm('Delete this git server?')) return;
+  await api('DELETE', `/git-servers/${id}`);
+  delete repoProjectsByServer[id];
+  loadGitServers();
+}
+
 // ── Repositories ───────────────────────────────────────────────────────────────
 async function loadRepos() {
   allRepos = await api('GET', '/repositories') || [];
   allModels = allModels.length ? allModels : await loadAllModels();
+  allGitServers = allGitServers.length ? allGitServers : await api('GET', '/git-servers').catch(() => []);
   document.getElementById('repos-body').innerHTML = allRepos.map(r => `
     <tr>
       <td>${r.name}</td>
+      <td>${r.git_server_name || '—'}</td>
       <td>${r.gitlab_project_id}</td>
       <td>${r.review_commits ? '✅' : '❌'}</td>
       <td>${r.review_mrs ? '✅' : '❌'}</td>
@@ -721,7 +950,7 @@ async function loadRepos() {
         <button class="btn btn-sm btn-danger" onclick="deleteRepo('${r.id}')">Delete</button>
       </td>
     </tr>
-  `).join('') || '<tr><td colspan="6" style="color:var(--text-muted);text-align:center">No repositories yet</td></tr>';
+  `).join('') || '<tr><td colspan="7" style="color:var(--text-muted);text-align:center">No repositories yet</td></tr>';
 }
 
 async function loadAllModels() {
@@ -737,44 +966,124 @@ async function loadAllModels() {
 async function openRepoModal(id) {
   editingId = id || null;
   document.getElementById('repo-modal-title').textContent = id ? 'Edit Repository' : 'Add Repository';
-  document.getElementById('repo-error').classList.add('hidden');
+  const errEl = document.getElementById('repo-error');
+  errEl.classList.add('hidden');
+  allGitServers = await api('GET', '/git-servers').catch(() => []);
+  if (!allGitServers.length) {
+    errEl.textContent = 'Add a git server before creating a repository.';
+    errEl.classList.remove('hidden');
+    document.getElementById('modal-repo').classList.remove('hidden');
+    return;
+  }
   const mods = allModels.length ? allModels : await loadAllModels();
-  const sel = document.getElementById('r-model');
-  sel.innerHTML = '<option value="">Global default</option>' + mods.map(m => `<option value="${m.id}">${m._endpoint_name} / ${m.model_name}</option>`).join('');
-  if (!id) { ['r-pid','r-name','r-url','r-token','r-secret'].forEach(f => document.getElementById(f).value=''); document.getElementById('r-commits').value='true'; document.getElementById('r-mrs').value='true'; }
+  const modelSel = document.getElementById('r-model');
+  const serverSel = document.getElementById('r-server');
+  modelSel.innerHTML = '<option value="">Global default</option>' + mods.map(m => `<option value="${m.id}">${m._endpoint_name} / ${m.model_name}</option>`).join('');
+  serverSel.innerHTML = allGitServers.map(server => `<option value="${server.id}">${server.name}</option>`).join('');
+  document.getElementById('r-project').innerHTML = '<option value="">Select a repository</option>';
+  document.getElementById('r-project-help').textContent = 'Select a git server to load accessible projects.';
+  if (!id) {
+    document.getElementById('r-secret').value = '';
+    document.getElementById('r-model').value = '';
+    document.getElementById('r-commits').value = 'true';
+    document.getElementById('r-mrs').value = 'true';
+  }
   document.getElementById('modal-repo').classList.remove('hidden');
+  if (!id) await loadServerProjectsForRepoModal();
 }
 
 async function editRepo(id) {
   const r = allRepos.find(r => r.id === id);
   await openRepoModal(id);
-  document.getElementById('r-pid').value = r.gitlab_project_id;
-  document.getElementById('r-name').value = r.name;
-  document.getElementById('r-url').value = r.gitlab_url;
-  document.getElementById('r-token').value = '';
+  document.getElementById('r-server').value = r.git_server_id;
+  await loadServerProjectsForRepoModal(false, {
+    id: r.gitlab_project_id,
+    name: r.name,
+    path_with_namespace: r.name,
+  });
+  document.getElementById('r-project').value = String(r.gitlab_project_id);
   document.getElementById('r-secret').value = '';
   document.getElementById('r-model').value = r.llm_model_id || '';
   document.getElementById('r-commits').value = String(r.review_commits);
   document.getElementById('r-mrs').value = String(r.review_mrs);
 }
 
+async function loadServerProjectsForRepoModal(forceReload = false, selectedProject = null) {
+  const errEl = document.getElementById('repo-error');
+  const serverId = document.getElementById('r-server').value;
+  const projectSel = document.getElementById('r-project');
+  const helpEl = document.getElementById('r-project-help');
+
+  errEl.classList.add('hidden');
+  projectSel.innerHTML = '<option value="">Loading repositories...</option>';
+
+  if (!serverId) {
+    projectSel.innerHTML = '<option value="">Select a repository</option>';
+    helpEl.textContent = 'Select a git server to load accessible projects.';
+    return;
+  }
+
+  helpEl.textContent = 'Loading repositories from the selected git server...';
+
+  try {
+    if (forceReload || !repoProjectsByServer[serverId]) {
+      repoProjectsByServer[serverId] = await api('GET', `/git-servers/${serverId}/projects`);
+    }
+    const projects = [...(repoProjectsByServer[serverId] || [])];
+    if (selectedProject && !projects.some(project => project.id === selectedProject.id)) {
+      projects.push(selectedProject);
+    }
+    projectSel.innerHTML = '<option value="">Select a repository</option>' + projects
+      .sort((a, b) => a.path_with_namespace.localeCompare(b.path_with_namespace))
+      .map(project => `<option value="${project.id}">${project.path_with_namespace}</option>`)
+      .join('');
+    helpEl.textContent = projects.length
+      ? `Loaded ${projects.length} repositor${projects.length === 1 ? 'y' : 'ies'} from the selected git server.`
+      : 'This git server did not return any accessible repositories.';
+    if (selectedProject) {
+      projectSel.value = String(selectedProject.id);
+    }
+  } catch (e) {
+    projectSel.innerHTML = '<option value="">Select a repository</option>';
+    helpEl.textContent = 'Unable to load repositories from the selected git server.';
+    errEl.textContent = e.message;
+    errEl.classList.remove('hidden');
+  }
+}
+
 async function saveRepo() {
   const errEl = document.getElementById('repo-error');
   errEl.classList.add('hidden');
+  const projectSel = document.getElementById('r-project');
+  const selectedOption = projectSel.options[projectSel.selectedIndex];
+  const projectId = parseInt(projectSel.value, 10);
+  const serverId = document.getElementById('r-server').value;
+  if (!serverId) {
+    errEl.textContent = 'Git server required';
+    errEl.classList.remove('hidden');
+    return;
+  }
+  if (!Number.isInteger(projectId)) {
+    errEl.textContent = 'Repository selection required';
+    errEl.classList.remove('hidden');
+    return;
+  }
   const body = {
-    gitlab_project_id: parseInt(document.getElementById('r-pid').value),
-    name: document.getElementById('r-name').value,
-    gitlab_url: document.getElementById('r-url').value,
+    git_server_id: serverId,
+    gitlab_project_id: projectId,
+    name: selectedOption ? selectedOption.textContent : '',
     review_commits: document.getElementById('r-commits').value === 'true',
     review_mrs: document.getElementById('r-mrs').value === 'true',
   };
-  const tok = document.getElementById('r-token').value;
   const sec = document.getElementById('r-secret').value;
   const mid = document.getElementById('r-model').value;
-  if (tok) body.gitlab_token = tok;
   if (sec) body.webhook_secret = sec;
   if (mid) body.llm_model_id = mid;
-  if (!editingId) { if (!tok) { errEl.textContent='GitLab token required'; errEl.classList.remove('hidden'); return; } body.gitlab_token=tok; if (!sec) { errEl.textContent='Webhook secret required'; errEl.classList.remove('hidden'); return; } body.webhook_secret=sec; }
+  if (!editingId && !sec) {
+    errEl.textContent = 'Webhook secret required';
+    errEl.classList.remove('hidden');
+    return;
+  }
   try {
     if (editingId) await api('PUT', `/repositories/${editingId}`, body);
     else await api('POST', '/repositories', body);
@@ -938,6 +1247,14 @@ async function loadReviews() {
 async function viewReview(id) {
   const job = await api('GET', `/reviews/${id}`);
   const comments = job.comments || [];
+  const commentLocation = (c) => {
+    if (!c.file_path) return '<span>General</span>';
+    if (!c.line_number) return `<code>${escHtml(c.file_path)}</code>`;
+    if (c.line_end && c.line_end !== c.line_number) {
+      return `<code>${escHtml(`${c.file_path}:${c.line_number}-${c.line_end}`)}</code>`;
+    }
+    return `<code>${escHtml(`${c.file_path}:${c.line_number}`)}</code>`;
+  };
   document.getElementById('review-detail-content').innerHTML = `
     <table style="margin-bottom:16px;width:100%">
       <tr><td style="color:var(--text-muted);width:140px">Status</td><td><span class="badge badge-${job.status}">${job.status}</span></td></tr>
@@ -951,7 +1268,7 @@ async function viewReview(id) {
       <div class="comment">
         <div class="comment-header">
           <span class="badge badge-${c.severity}">${c.severity}</span>
-          ${c.file_path ? `<code>${c.file_path}${c.line_number ? ':'+c.line_number : ''}</code>` : '<span>General</span>'}
+          ${commentLocation(c)}
           ${c.posted_at ? '✅ Posted to GitLab' : '⏳ Not posted'}
         </div>
         <div class="comment-body">${escHtml(c.comment_body)}</div>
@@ -1130,7 +1447,6 @@ function toggleAutoRefresh() {
 }
 
 // Stop auto-refresh when leaving the workers page
-const _origShowPage = showPage;
 function showPage(name) {
   if (name !== 'workers' && _autoRefreshTimer) {
     clearInterval(_autoRefreshTimer);
@@ -1138,7 +1454,7 @@ function showPage(name) {
     const btn = document.getElementById('workers-auto-btn');
     if (btn) { btn.textContent = 'Auto-refresh: OFF'; btn.classList.remove('btn-primary'); btn.classList.add('btn-secondary'); }
   }
-  _origShowPage(name);
+  renderPage(name);
 }
 
 // ── Utilities ──────────────────────────────────────────────────────────────────

@@ -38,6 +38,7 @@ class LLMModelCreate(BaseModel):
 
 
 class LLMModelUpdate(BaseModel):
+    model_name: str | None = None
     display_name: str | None = None
     max_context_tokens: int | None = None
     temperature: float | None = None
@@ -57,3 +58,7 @@ class LLMModelRead(BaseModel):
     is_active: bool
     is_global_default: bool
     created_at: datetime
+
+
+class LLMEndpointAvailableModelRead(BaseModel):
+    model_name: str

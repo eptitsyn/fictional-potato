@@ -19,6 +19,7 @@ class ReviewCommentRead(BaseModel):
     job_id: uuid.UUID
     file_path: str | None
     line_number: int | None
+    line_end: int | None
     comment_body: str
     severity: str
     gitlab_note_id: str | None

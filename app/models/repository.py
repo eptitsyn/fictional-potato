@@ -1,7 +1,7 @@
 import uuid
 from datetime import UTC, datetime
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, Text
+from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -10,15 +10,24 @@ from app.core.database import Base
 
 class Repository(Base):
     __tablename__ = "repositories"
+    __table_args__ = (
+        UniqueConstraint(
+            "git_server_id",
+            "gitlab_project_id",
+            name="uq_repositories_git_server_project",
+        ),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
     )
-    gitlab_project_id: Mapped[int] = mapped_column(Integer, unique=True, nullable=False)
+    git_server_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("git_servers.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    gitlab_project_id: Mapped[int] = mapped_column(Integer, nullable=False)
     name: Mapped[str] = mapped_column(String(300), nullable=False)
-    gitlab_url: Mapped[str] = mapped_column(String(500), nullable=False)
-    # Fernet-encrypted project-scoped access token
-    gitlab_token_encrypted: Mapped[str] = mapped_column(Text, nullable=False)
     # Fernet-encrypted webhook secret
     webhook_secret_encrypted: Mapped[str] = mapped_column(Text, nullable=False)
     llm_model_id: Mapped[uuid.UUID | None] = mapped_column(
@@ -39,9 +48,20 @@ class Repository(Base):
         nullable=False,
     )
 
+    git_server: Mapped["GitServer"] = relationship(  # noqa: F821
+        "GitServer", back_populates="repositories"
+    )
     llm_model: Mapped["LLMModel | None"] = relationship(  # noqa: F821
         "LLMModel", back_populates="repositories"
     )
     review_jobs: Mapped[list["ReviewJob"]] = relationship(  # noqa: F821
         "ReviewJob", back_populates="repository", cascade="all, delete-orphan"
     )
+
+    @property
+    def git_server_name(self) -> str | None:
+        return self.git_server.name if self.git_server else None
+
+    @property
+    def git_server_url(self) -> str | None:
+        return self.git_server.base_url if self.git_server else None

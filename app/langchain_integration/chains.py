@@ -14,6 +14,7 @@ from langchain_core.output_parsers import StrOutputParser
 from langchain_openai import ChatOpenAI
 
 from app.core.exceptions import LLMServiceError
+from app.core.network import resolve_endpoint_base_url
 from app.models.llm import LLMModel
 from app.models.prompt import Prompt
 
@@ -26,7 +27,7 @@ def _build_llm(model: LLMModel, api_key: str | None) -> ChatOpenAI:
     kwargs: dict = {
         "model": model.model_name,
         "temperature": model.temperature,
-        "base_url": model.endpoint.base_url,
+        "base_url": resolve_endpoint_base_url(model.endpoint.base_url),
     }
     if api_key:
         kwargs["api_key"] = api_key
@@ -89,6 +90,16 @@ def _extract_json(text: str) -> list[dict]:
     raise LLMServiceError(f"Could not parse LLM output as JSON array. Output: {text[:500]}")
 
 
+def _normalize_comment(c: dict) -> dict:
+    return {
+        "file_path": c.get("file_path"),
+        "line_number": c.get("start_line", c.get("line_number")),
+        "line_end": c.get("end_line"),
+        "severity": c.get("severity", "info"),
+        "comment_body": c.get("comment", c.get("comment_body", "")),
+    }
+
+
 async def run_review_chain(
     diff: str,
     metadata: dict,
@@ -100,8 +111,7 @@ async def run_review_chain(
     """
     Build and run the review chain.
 
-    Returns a list of dicts:
-      {"file_path": str|None, "line_number": int|None, "severity": str, "comment": str}
+    Returns a list of dicts with file path, start/end line, severity, and comment body.
     """
     llm = _build_llm(model, api_key)
     parser = StrOutputParser()
@@ -136,11 +146,6 @@ async def run_review_chain(
 
         # Normalize and validate
         for c in comments:
-            all_comments.append({
-                "file_path": c.get("file_path"),
-                "line_number": c.get("line_number"),
-                "severity": c.get("severity", "info"),
-                "comment_body": c.get("comment", c.get("comment_body", "")),
-            })
+            all_comments.append(_normalize_comment(c))
 
     return all_comments

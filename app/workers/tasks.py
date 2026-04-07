@@ -8,6 +8,7 @@ import asyncio
 import logging
 import uuid
 from datetime import UTC, datetime
+from typing import Any
 
 from celery import Task
 
@@ -44,11 +45,14 @@ async def _execute_review(job_id: uuid.UUID) -> dict:
 
     from app.core.database import AsyncSessionLocal
     from app.langchain_integration.review_graph import run_review_graph
+    from app.models.llm import LLMModel
+    from app.models.repository import Repository
     from app.models.review import ReviewComment, ReviewJob
-    from app.services.gitlab_service import GitLabClient
+    from app.services.gitlab_positioning import GitLabDiffPositionResolver
+    from app.services.gitlab_service import GitLabClient, _format_diff
+    from app.services.git_server_service import get_decrypted_access_token
     from app.services.llm_endpoint_service import get_decrypted_api_key, get_global_default_model
     from app.services.prompt_service import resolve_effective_prompt
-    from app.services.repository_service import get_decrypted_gitlab_token
 
     async with AsyncSessionLocal() as db:
         # Load job with all necessary relations
@@ -56,9 +60,10 @@ async def _execute_review(job_id: uuid.UUID) -> dict:
             select(ReviewJob)
             .where(ReviewJob.id == job_id)
             .options(
-                selectinload(ReviewJob.repository).selectinload(
-                    ReviewJob.repository.__class__.llm_model
-                ).selectinload(ReviewJob.repository.__class__.llm_model.__class__.endpoint)
+                selectinload(ReviewJob.repository).selectinload(Repository.git_server),
+                selectinload(ReviewJob.repository)
+                .selectinload(Repository.llm_model)
+                .selectinload(LLMModel.endpoint),
             )
         )
         job = result.scalar_one_or_none()
@@ -81,13 +86,24 @@ async def _execute_review(job_id: uuid.UUID) -> dict:
                 raise RuntimeError("No active LLM model configured. Add one in Settings → LLM Models.")
 
             api_key = get_decrypted_api_key(model.endpoint)
-            gitlab_token = get_decrypted_gitlab_token(repo)
-            gitlab = GitLabClient(repo.gitlab_url, gitlab_token)
+            gitlab_token = get_decrypted_access_token(repo.git_server)
+            gitlab = GitLabClient(repo.git_server.base_url, gitlab_token)
+            position_resolver: GitLabDiffPositionResolver | None = None
 
             # Fetch diff + metadata
             if job.trigger_type == "commit":
-                diff = await gitlab.get_commit_diff(repo.gitlab_project_id, job.commit_sha)
+                commit_changes = await gitlab.get_commit_diff_entries(
+                    repo.gitlab_project_id, job.commit_sha
+                )
+                diff = _format_diff(commit_changes)
                 commit_info = await gitlab.get_commit(repo.gitlab_project_id, job.commit_sha)
+                parent_sha = (commit_info.get("parent_ids") or [None])[0]
+                position_resolver = GitLabDiffPositionResolver(
+                    base_sha=parent_sha,
+                    start_sha=parent_sha,
+                    head_sha=job.commit_sha,
+                    changes=commit_changes,
+                )
                 metadata = {
                     "commit_sha": job.commit_sha,
                     "repository_name": repo.name,
@@ -99,8 +115,19 @@ async def _execute_review(job_id: uuid.UUID) -> dict:
                 }
                 review_prompt_type = "commit_review"
             else:
-                diff = await gitlab.get_mr_changes(repo.gitlab_project_id, job.mr_iid)
+                mr_changes_payload = await gitlab.get_mr_changes_payload(
+                    repo.gitlab_project_id, job.mr_iid
+                )
+                mr_changes = mr_changes_payload.get("changes", [])
+                diff = _format_diff(mr_changes)
                 mr_info = await gitlab.get_mr(repo.gitlab_project_id, job.mr_iid)
+                diff_refs = mr_info.get("diff_refs") or {}
+                position_resolver = GitLabDiffPositionResolver(
+                    base_sha=diff_refs.get("base_sha"),
+                    start_sha=diff_refs.get("start_sha"),
+                    head_sha=diff_refs.get("head_sha"),
+                    changes=mr_changes,
+                )
                 metadata = {
                     "mr_title": mr_info.get("title", ""),
                     "mr_description": mr_info.get("description", "")[:500],
@@ -143,11 +170,13 @@ async def _execute_review(job_id: uuid.UUID) -> dict:
                 severity = c.get("severity", "info")
                 if severity not in ("info", "warning", "error"):
                     severity = "info"
+                line_number, line_end = _normalize_comment_lines(c)
 
                 comment = ReviewComment(
                     job_id=job.id,
                     file_path=c.get("file_path"),
-                    line_number=c.get("line_number"),
+                    line_number=line_number,
+                    line_end=line_end if line_end != line_number else None,
                     comment_body=c.get("comment_body", ""),
                     severity=severity,
                 )
@@ -156,20 +185,29 @@ async def _execute_review(job_id: uuid.UUID) -> dict:
 
                 # Post to GitLab
                 try:
-                    body = _format_gitlab_comment(c)
+                    body = _format_gitlab_comment(c, line_number=line_number, line_end=line_end)
+                    position = None
+                    if position_resolver:
+                        position = position_resolver.resolve(
+                            file_path=c.get("file_path"),
+                            line_number=line_number,
+                            line_end=line_end,
+                        )
                     if job.trigger_type == "commit":
-                        resp = await gitlab.post_commit_comment(
+                        resp = await gitlab.post_commit_discussion(
                             repo.gitlab_project_id,
                             job.commit_sha,
                             body,
-                            path=c.get("file_path"),
-                            line=c.get("line_number"),
+                            position=position,
                         )
                     else:
-                        resp = await gitlab.post_mr_note(
-                            repo.gitlab_project_id, job.mr_iid, body
+                        resp = await gitlab.post_mr_discussion(
+                            repo.gitlab_project_id,
+                            job.mr_iid,
+                            body,
+                            position=position,
                         )
-                    comment.gitlab_note_id = str(resp.get("id", ""))
+                    comment.gitlab_note_id = _extract_gitlab_note_id(resp)
                     comment.posted_at = now
                 except Exception as post_err:
                     logger.warning("Failed to post comment to GitLab: %s", post_err)
@@ -194,12 +232,64 @@ async def _execute_review(job_id: uuid.UUID) -> dict:
             return {"status": "failed", "detail": str(exc)}
 
 
-def _format_gitlab_comment(c: dict) -> str:
+def _coerce_positive_int(value: Any) -> int | None:
+    if value is None or value == "":
+        return None
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        return None
+    return number if number > 0 else None
+
+
+def _normalize_comment_lines(c: dict) -> tuple[int | None, int | None]:
+    line_number = _coerce_positive_int(c.get("start_line"))
+    if line_number is None:
+        line_number = _coerce_positive_int(c.get("line_number"))
+
+    line_end = _coerce_positive_int(c.get("end_line"))
+    if line_number is None:
+        return None, None
+    if line_end is None:
+        line_end = line_number
+    if line_end < line_number:
+        line_number, line_end = line_end, line_number
+    return line_number, line_end
+
+
+def _format_comment_location(
+    file_path: str | None, line_number: int | None, line_end: int | None
+) -> str | None:
+    if not file_path:
+        return None
+    if line_number is None:
+        return file_path
+    if line_end and line_end != line_number:
+        return f"{file_path}:{line_number}-{line_end}"
+    return f"{file_path}:{line_number}"
+
+
+def _extract_gitlab_note_id(response: dict) -> str:
+    notes = response.get("notes")
+    if isinstance(notes, list) and notes:
+        note_id = notes[0].get("id")
+        if note_id is not None:
+            return str(note_id)
+    response_id = response.get("id")
+    return str(response_id) if response_id is not None else ""
+
+
+def _format_gitlab_comment(
+    c: dict, *, line_number: int | None = None, line_end: int | None = None
+) -> str:
     severity = c.get("severity", "info")
     icon = {"info": "ℹ️", "warning": "⚠️", "error": "🚨"}.get(severity, "ℹ️")
     body = c.get("comment_body", "")
+    location = _format_comment_location(c.get("file_path"), line_number, line_end)
+    location_block = f"**Location:** `{location}`\n\n" if location else ""
     return (
         f"{icon} **AI Review [{severity.upper()}]**\n\n"
+        f"{location_block}"
         f"{body}\n\n"
         f"---\n*Generated by [AI Code Reviewer](https://github.com) using LangGraph*"
     )

@@ -6,12 +6,21 @@ from sqlalchemy.orm import selectinload
 
 from app.core.exceptions import ConflictError, NotFoundError
 from app.core.security import decrypt, encrypt
+from app.models.git_server import GitServer
+from app.models.llm import LLMModel
 from app.models.repository import Repository
 from app.schemas.repository import RepositoryCreate, RepositoryUpdate
 
 
 async def list_repositories(db: AsyncSession) -> list[Repository]:
-    result = await db.execute(select(Repository).order_by(Repository.name))
+    result = await db.execute(
+        select(Repository)
+        .order_by(Repository.name)
+        .options(
+            selectinload(Repository.git_server),
+            selectinload(Repository.llm_model),
+        )
+    )
     return list(result.scalars().all())
 
 
@@ -19,7 +28,10 @@ async def get_repository(db: AsyncSession, repo_id: uuid.UUID) -> Repository:
     result = await db.execute(
         select(Repository)
         .where(Repository.id == repo_id)
-        .options(selectinload(Repository.llm_model))
+        .options(
+            selectinload(Repository.git_server),
+            selectinload(Repository.llm_model),
+        )
     )
     repo = result.scalar_one_or_none()
     if not repo:
@@ -28,30 +40,40 @@ async def get_repository(db: AsyncSession, repo_id: uuid.UUID) -> Repository:
 
 
 async def get_repository_by_gitlab_id(
-    db: AsyncSession, gitlab_project_id: int
+    db: AsyncSession, git_server_id: uuid.UUID, gitlab_project_id: int
 ) -> Repository | None:
     result = await db.execute(
         select(Repository)
-        .where(Repository.gitlab_project_id == gitlab_project_id, Repository.is_active == True)  # noqa: E712
-        .options(selectinload(Repository.llm_model).selectinload(Repository.llm_model.__class__.endpoint))
+        .where(
+            Repository.git_server_id == git_server_id,
+            Repository.gitlab_project_id == gitlab_project_id,
+            Repository.is_active == True,  # noqa: E712
+        )
+        .options(
+            selectinload(Repository.git_server),
+            selectinload(Repository.llm_model).selectinload(LLMModel.endpoint),
+        )
     )
     return result.scalar_one_or_none()
 
 
 async def create_repository(db: AsyncSession, data: RepositoryCreate) -> Repository:
+    await _ensure_git_server_exists(db, data.git_server_id)
     existing = await db.execute(
-        select(Repository).where(Repository.gitlab_project_id == data.gitlab_project_id)
+        select(Repository).where(
+            Repository.git_server_id == data.git_server_id,
+            Repository.gitlab_project_id == data.gitlab_project_id,
+        )
     )
     if existing.first():
         raise ConflictError(
-            f"Repository with GitLab project ID {data.gitlab_project_id} already exists"
+            f"Repository with GitLab project ID {data.gitlab_project_id} already exists on this git server"
         )
 
     repo = Repository(
+        git_server_id=data.git_server_id,
         gitlab_project_id=data.gitlab_project_id,
         name=data.name,
-        gitlab_url=data.gitlab_url,
-        gitlab_token_encrypted=encrypt(data.gitlab_token),
         webhook_secret_encrypted=encrypt(data.webhook_secret),
         llm_model_id=data.llm_model_id,
         review_commits=data.review_commits,
@@ -60,7 +82,7 @@ async def create_repository(db: AsyncSession, data: RepositoryCreate) -> Reposit
     db.add(repo)
     await db.commit()
     await db.refresh(repo)
-    return repo
+    return await get_repository(db, repo.id)
 
 
 async def update_repository(
@@ -69,16 +91,35 @@ async def update_repository(
     repo = await get_repository(db, repo_id)
     update_data = data.model_dump(exclude_none=True)
 
-    if "gitlab_token" in update_data:
-        repo.gitlab_token_encrypted = encrypt(update_data.pop("gitlab_token"))
     if "webhook_secret" in update_data:
         repo.webhook_secret_encrypted = encrypt(update_data.pop("webhook_secret"))
+
+    next_git_server_id = update_data.get("git_server_id", repo.git_server_id)
+    next_project_id = update_data.get("gitlab_project_id", repo.gitlab_project_id)
+    if next_git_server_id != repo.git_server_id:
+        await _ensure_git_server_exists(db, next_git_server_id)
+
+    if (
+        next_git_server_id != repo.git_server_id
+        or next_project_id != repo.gitlab_project_id
+    ):
+        existing = await db.execute(
+            select(Repository).where(
+                Repository.id != repo.id,
+                Repository.git_server_id == next_git_server_id,
+                Repository.gitlab_project_id == next_project_id,
+            )
+        )
+        if existing.first():
+            raise ConflictError(
+                f"Repository with GitLab project ID {next_project_id} already exists on this git server"
+            )
 
     for field, value in update_data.items():
         setattr(repo, field, value)
     await db.commit()
     await db.refresh(repo)
-    return repo
+    return await get_repository(db, repo.id)
 
 
 async def delete_repository(db: AsyncSession, repo_id: uuid.UUID) -> None:
@@ -87,9 +128,11 @@ async def delete_repository(db: AsyncSession, repo_id: uuid.UUID) -> None:
     await db.commit()
 
 
-def get_decrypted_gitlab_token(repo: Repository) -> str:
-    return decrypt(repo.gitlab_token_encrypted)
-
-
 def get_decrypted_webhook_secret(repo: Repository) -> str:
     return decrypt(repo.webhook_secret_encrypted)
+
+
+async def _ensure_git_server_exists(db: AsyncSession, server_id: uuid.UUID) -> None:
+    existing = await db.execute(select(GitServer.id).where(GitServer.id == server_id))
+    if not existing.first():
+        raise NotFoundError(f"Git server {server_id} not found")

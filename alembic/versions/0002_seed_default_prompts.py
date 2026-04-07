@@ -33,14 +33,16 @@ Diff:
 
 Respond with a JSON array. Each element must have exactly these fields:
 - "file_path": string or null (path to the file)
-- "line_number": integer or null (line number in the new file)
+- "start_line": integer or null (first line number in the new file)
+- "end_line": integer or null (last line number for a continuous range; use the same value as start_line for a single line)
 - "severity": "info" | "warning" | "error"
 - "comment": string (your review comment, be specific and actionable)
 
 Example:
 [
-  {{"file_path": "src/auth.py", "line_number": 42, "severity": "error", "comment": "SQL injection risk: use parameterized queries instead of string formatting"}},
-  {{"file_path": null, "line_number": null, "severity": "info", "comment": "Overall commit looks good, consider adding unit tests for the new validation logic"}}
+  {{"file_path": "src/auth.py", "start_line": 42, "end_line": 42, "severity": "error", "comment": "SQL injection risk: use parameterized queries instead of string formatting"}},
+  {{"file_path": "src/auth.py", "start_line": 80, "end_line": 83, "severity": "warning", "comment": "These lines repeat validation logic that should live in one helper to avoid drift"}},
+  {{"file_path": null, "start_line": null, "end_line": null, "severity": "info", "comment": "Overall commit looks good, consider adding unit tests for the new validation logic"}}
 ]"""
 
 MR_REVIEW_PROMPT = """Review the following merge request diff and provide detailed code review comments.
@@ -55,7 +57,8 @@ Diff:
 
 Respond with a JSON array. Each element must have exactly these fields:
 - "file_path": string or null
-- "line_number": integer or null
+- "start_line": integer or null
+- "end_line": integer or null
 - "severity": "info" | "warning" | "error"
 - "comment": string
 

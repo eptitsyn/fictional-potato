@@ -4,6 +4,7 @@ from fastapi import APIRouter
 
 from app.dependencies import AdminUser, DB, ReviewerUser
 from app.schemas.llm import (
+    LLMEndpointAvailableModelRead,
     LLMEndpointCreate,
     LLMEndpointRead,
     LLMEndpointUpdate,
@@ -53,6 +54,14 @@ async def list_models(endpoint_id: uuid.UUID, db: DB, _: ReviewerUser):
     return await svc.list_models_for_endpoint(db, endpoint_id)
 
 
+@router.get(
+    "/{endpoint_id}/available-models",
+    response_model=list[LLMEndpointAvailableModelRead],
+)
+async def list_available_models(endpoint_id: uuid.UUID, db: DB, _: ReviewerUser):
+    return await svc.list_available_models_for_endpoint(db, endpoint_id)
+
+
 @router.post("/{endpoint_id}/models", response_model=LLMModelRead, status_code=201)
 async def create_model(endpoint_id: uuid.UUID, data: LLMModelCreate, db: DB, _: AdminUser):
     return await svc.create_model(db, endpoint_id, data)
@@ -64,6 +73,11 @@ router_models = APIRouter(prefix="/llm-models", tags=["llm-models"])
 @router_models.get("/{model_id}", response_model=LLMModelRead)
 async def get_model(model_id: uuid.UUID, db: DB, _: ReviewerUser):
     return await svc.get_model(db, model_id)
+
+
+@router_models.post("/{model_id}/test")
+async def test_model(model_id: uuid.UUID, db: DB, _: AdminUser):
+    return await svc.test_model(db, model_id)
 
 
 @router_models.put("/{model_id}", response_model=LLMModelRead)

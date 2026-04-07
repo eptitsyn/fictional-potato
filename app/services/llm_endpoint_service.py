@@ -1,15 +1,123 @@
 import uuid
 
 import httpx
+from fastapi import HTTPException, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
+from app.core.network import resolve_endpoint_base_url
 from app.core.exceptions import ConflictError, NotFoundError
 from app.core.security import decrypt, encrypt
 from app.models.llm import LLMEndpoint, LLMModel
 from app.models.user import User
 from app.schemas.llm import LLMEndpointCreate, LLMEndpointUpdate, LLMModelCreate, LLMModelUpdate
+
+
+def _build_endpoint_headers(endpoint: LLMEndpoint) -> dict[str, str]:
+    api_key = decrypt(endpoint.api_key_encrypted) if endpoint.api_key_encrypted else None
+    return {"Authorization": f"Bearer {api_key}"} if api_key else {}
+
+
+def _extract_available_model_names(payload: object) -> list[str]:
+    raw_models = payload
+    if isinstance(payload, dict):
+        if isinstance(payload.get("data"), list):
+            raw_models = payload["data"]
+        elif isinstance(payload.get("models"), list):
+            raw_models = payload["models"]
+        else:
+            raw_models = []
+
+    if not isinstance(raw_models, list):
+        return []
+
+    names: list[str] = []
+    seen: set[str] = set()
+    for item in raw_models:
+        model_name: str | None = None
+        if isinstance(item, str):
+            model_name = item
+        elif isinstance(item, dict):
+            candidate = item.get("id") or item.get("model_name") or item.get("name")
+            if isinstance(candidate, str):
+                model_name = candidate
+
+        if not model_name:
+            continue
+
+        normalized = model_name.strip()
+        if normalized and normalized not in seen:
+            seen.add(normalized)
+            names.append(normalized)
+
+    return sorted(names, key=str.casefold)
+
+
+def _extract_chat_completion_preview(payload: object) -> str | None:
+    if not isinstance(payload, dict):
+        return None
+
+    choices = payload.get("choices")
+    if not isinstance(choices, list) or not choices:
+        return None
+
+    first_choice = choices[0]
+    if not isinstance(first_choice, dict):
+        return None
+
+    message = first_choice.get("message")
+    if not isinstance(message, dict):
+        return None
+
+    content = message.get("content")
+    if isinstance(content, str):
+        return content.strip() or None
+    if isinstance(content, list):
+        parts: list[str] = []
+        for item in content:
+            if isinstance(item, dict) and isinstance(item.get("text"), str):
+                text = item["text"].strip()
+                if text:
+                    parts.append(text)
+        if parts:
+            return "\n".join(parts)
+
+    return None
+
+
+async def _fetch_endpoint_models_payload(endpoint: LLMEndpoint) -> object:
+    try:
+        resolved_base_url = resolve_endpoint_base_url(endpoint.base_url)
+        async with httpx.AsyncClient(timeout=10) as client:
+            response = await client.get(
+                f"{resolved_base_url.rstrip('/')}/models",
+                headers=_build_endpoint_headers(endpoint),
+            )
+            response.raise_for_status()
+        return response.json()
+    except httpx.HTTPStatusError as exc:
+        detail = exc.response.text.strip() or exc.response.reason_phrase
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=(
+                f"Endpoint returned {exc.response.status_code} while listing models"
+                + (f": {detail}" if detail else "")
+            ),
+        ) from exc
+    except httpx.HTTPError as exc:
+        hint = ""
+        if resolved_base_url != endpoint.base_url:
+            hint = f" Tried {resolved_base_url} from inside Docker."
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"Failed to fetch models from endpoint: {exc}.{hint}".strip(),
+        ) from exc
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="Endpoint returned invalid JSON for /models",
+        ) from exc
 
 
 # ── Endpoints ──────────────────────────────────────────────────────────────────
@@ -73,13 +181,14 @@ async def delete_endpoint(db: AsyncSession, endpoint_id: uuid.UUID) -> None:
 
 async def test_endpoint(db: AsyncSession, endpoint_id: uuid.UUID) -> dict:
     ep = await get_endpoint(db, endpoint_id)
-    api_key = decrypt(ep.api_key_encrypted) if ep.api_key_encrypted else None
-    headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
 
     try:
-        async with httpx.AsyncClient(timeout=10) as client:
-            r = await client.get(f"{ep.base_url.rstrip('/')}/models", headers=headers)
-        return {"status": "ok", "http_status": r.status_code}
+        payload = await _fetch_endpoint_models_payload(ep)
+        return {
+            "status": "ok",
+            "http_status": status.HTTP_200_OK,
+            "models_found": len(_extract_available_model_names(payload)),
+        }
     except Exception as e:
         return {"status": "error", "detail": str(e)}
 
@@ -101,6 +210,14 @@ async def list_models_for_endpoint(db: AsyncSession, endpoint_id: uuid.UUID) -> 
     return list(result.scalars().all())
 
 
+async def list_available_models_for_endpoint(
+    db: AsyncSession, endpoint_id: uuid.UUID
+) -> list[dict[str, str]]:
+    endpoint = await get_endpoint(db, endpoint_id)
+    payload = await _fetch_endpoint_models_payload(endpoint)
+    return [{"model_name": model_name} for model_name in _extract_available_model_names(payload)]
+
+
 async def get_model(db: AsyncSession, model_id: uuid.UUID) -> LLMModel:
     result = await db.execute(
         select(LLMModel).where(LLMModel.id == model_id).options(selectinload(LLMModel.endpoint))
@@ -118,6 +235,59 @@ async def get_global_default_model(db: AsyncSession) -> LLMModel | None:
         .options(selectinload(LLMModel.endpoint))
     )
     return result.scalar_one_or_none()
+
+
+async def test_model(db: AsyncSession, model_id: uuid.UUID) -> dict:
+    model = await get_model(db, model_id)
+    resolved_base_url = resolve_endpoint_base_url(model.endpoint.base_url)
+    headers = {"Content-Type": "application/json", **_build_endpoint_headers(model.endpoint)}
+    payload = {
+        "model": model.model_name,
+        "messages": [{"role": "user", "content": "Reply with exactly OK."}],
+        "temperature": 0,
+        "max_tokens": 8,
+    }
+
+    try:
+        async with httpx.AsyncClient(timeout=20) as client:
+            response = await client.post(
+                f"{resolved_base_url.rstrip('/')}/chat/completions",
+                headers=headers,
+                json=payload,
+            )
+            response.raise_for_status()
+
+        response_payload = response.json()
+        preview = _extract_chat_completion_preview(response_payload)
+        return {
+            "status": "ok",
+            "http_status": response.status_code,
+            "model_name": model.model_name,
+            "response_preview": preview,
+        }
+    except httpx.HTTPStatusError as exc:
+        detail = exc.response.text.strip() or exc.response.reason_phrase
+        return {
+            "status": "error",
+            "http_status": exc.response.status_code,
+            "detail": (
+                f"Model test failed with {exc.response.status_code}"
+                + (f": {detail}" if detail else "")
+            ),
+        }
+    except httpx.HTTPError as exc:
+        hint = ""
+        if resolved_base_url != model.endpoint.base_url:
+            hint = f" Tried {resolved_base_url} from inside Docker."
+        return {
+            "status": "error",
+            "detail": f"Failed to reach model endpoint: {exc}.{hint}".strip(),
+        }
+    except ValueError:
+        return {
+            "status": "error",
+            "detail": "Model endpoint returned invalid JSON for /chat/completions",
+        }
 
 
 async def create_model(
@@ -155,6 +325,19 @@ async def update_model(
 ) -> LLMModel:
     model = await get_model(db, model_id)
     update_data = data.model_dump(exclude_none=True)
+
+    if "model_name" in update_data and update_data["model_name"] != model.model_name:
+        existing = await db.execute(
+            select(LLMModel).where(
+                LLMModel.endpoint_id == model.endpoint_id,
+                LLMModel.model_name == update_data["model_name"],
+                LLMModel.id != model_id,
+            )
+        )
+        if existing.first():
+            raise ConflictError(
+                f"Model '{update_data['model_name']}' already exists for this endpoint"
+            )
 
     if update_data.get("is_global_default"):
         result = await db.execute(
