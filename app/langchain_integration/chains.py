@@ -6,6 +6,7 @@ endpoint (Ollama, Mistral, Azure, etc.) works transparently.
 from __future__ import annotations
 
 import json
+import logging
 import math
 import re
 import textwrap
@@ -21,6 +22,8 @@ from app.core.network import resolve_endpoint_base_url
 from app.models.llm import LLMModel
 from app.models.prompt import Prompt
 
+logger = logging.getLogger(__name__)
+
 # Max chars to send per chunk (rough token-to-char ratio of ~4)
 _CHARS_PER_TOKEN = 4
 _SAFETY_FACTOR = 0.85  # leave headroom for prompt overhead
@@ -28,6 +31,7 @@ _MIN_PROMPTABLE_TOKENS = 64
 _RESPONSE_TOKENS_RATIO = 0.18
 _MIN_RESPONSE_TOKENS = 256
 _MAX_RESPONSE_TOKENS = 2048
+_MAX_LLM_LOG_CHARS = 4000
 _RUSSIAN_OUTPUT_CONSTRAINT = textwrap.dedent("""
     Дополнительное требование:
     Отвечай только по-русски.
@@ -188,6 +192,21 @@ def _extract_json(text: str) -> list[dict]:
     raise LLMServiceError(f"Could not parse LLM output as JSON array. Output: {text[:500]}")
 
 
+def _truncate_llm_output_for_log(text: str) -> str:
+    if len(text) <= _MAX_LLM_LOG_CHARS:
+        return text
+    return f"{text[:_MAX_LLM_LOG_CHARS]}\n...[truncated]"
+
+
+def _log_llm_parse_failure(*, stage: str, output: str, error: Exception) -> None:
+    logger.warning(
+        "Failed to parse LLM output as JSON at stage=%s: %s | raw_output=%s",
+        stage,
+        error,
+        _truncate_llm_output_for_log(output),
+    )
+
+
 def _coerce_positive_int(value: Any) -> int | None:
     if value is None or value == "":
         return None
@@ -315,7 +334,15 @@ async def run_review_chain(
 
         chain = llm | parser
         raw_output = await chain.ainvoke(messages)
-        comments = _extract_json(raw_output)
+        try:
+            comments = _extract_json(raw_output)
+        except LLMServiceError as exc:
+            _log_llm_parse_failure(
+                stage=f"single_shot_chunk_{i + 1}_of_{len(chunks)}",
+                output=raw_output,
+                error=exc,
+            )
+            raise
 
         # Normalize and validate
         for c in comments:

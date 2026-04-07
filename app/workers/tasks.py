@@ -5,6 +5,7 @@ Uses the LangGraph multi-step review pipeline (security + quality → consolidat
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import uuid
@@ -242,6 +243,17 @@ async def _execute_review(job_id: uuid.UUID) -> dict:
                             line_number=line_number,
                             line_end=line_end,
                         )
+                    if line_number is not None and line_end is not None and line_end != line_number:
+                        logger.info(
+                            "Prepared multiline GitLab comment position for job %s comment %s: "
+                            "file_path=%s line_number=%s line_end=%s position=%s",
+                            job.id,
+                            comment.id,
+                            c.get("file_path"),
+                            line_number,
+                            line_end,
+                            json.dumps(position, ensure_ascii=False, sort_keys=True),
+                        )
                     if job.trigger_type == "commit":
                         resp = await gitlab.post_commit_discussion(
                             repo.gitlab_project_id,
@@ -259,7 +271,20 @@ async def _execute_review(job_id: uuid.UUID) -> dict:
                     comment.gitlab_note_id = _extract_gitlab_note_id(resp)
                     comment.posted_at = now
                 except Exception as post_err:
-                    logger.warning("Failed to post comment to GitLab: %s", post_err)
+                    logger.warning(
+                        "Failed to post comment to GitLab: %s | job_id=%s comment_id=%s "
+                        "trigger_type=%s file_path=%s line_number=%s line_end=%s "
+                        "position=%s body=%s",
+                        post_err,
+                        job.id,
+                        comment.id,
+                        job.trigger_type,
+                        c.get("file_path"),
+                        line_number,
+                        line_end,
+                        json.dumps(position, ensure_ascii=False, sort_keys=True),
+                        body,
+                    )
 
             job.status = "completed"
             job.completed_at = datetime.now(UTC)

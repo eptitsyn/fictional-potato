@@ -39,6 +39,7 @@ from app.langchain_integration.chains import (
     _deduplicate_comments,
     _enforce_russian_output,
     _extract_json,
+    _log_llm_parse_failure,
     _normalize_comment,
     _render_review_prompt_instructions,
     _scaled_token_budget,
@@ -302,7 +303,8 @@ async def _run_graph(
 
     try:
         security_comments = _extract_json(sec_raw)
-    except LLMServiceError:
+    except LLMServiceError as exc:
+        _log_llm_parse_failure(stage="graph_security", output=sec_raw, error=exc)
         security_comments = []
 
     # ── Node 3: Quality Review ─────────────────────────────────────────────────
@@ -334,7 +336,8 @@ async def _run_graph(
 
     try:
         quality_comments = _extract_json(qual_raw)
-    except LLMServiceError:
+    except LLMServiceError as exc:
+        _log_llm_parse_failure(stage="graph_quality", output=qual_raw, error=exc)
         quality_comments = []
 
     # ── Node 4: Consolidation ──────────────────────────────────────────────────
@@ -376,7 +379,8 @@ async def _run_graph(
 
     try:
         final = _extract_json(final_raw)
-    except LLMServiceError:
+    except LLMServiceError as exc:
+        _log_llm_parse_failure(stage="graph_consolidate", output=final_raw, error=exc)
         final = _deduplicate_comments(all_raw)
 
     # Normalize
