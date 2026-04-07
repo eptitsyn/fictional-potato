@@ -6,8 +6,10 @@ endpoint (Ollama, Mistral, Azure, etc.) works transparently.
 from __future__ import annotations
 
 import json
+import math
 import re
 import textwrap
+from collections.abc import Sequence
 
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_core.output_parsers import StrOutputParser
@@ -21,6 +23,10 @@ from app.models.prompt import Prompt
 # Max chars to send per chunk (rough token-to-char ratio of ~4)
 _CHARS_PER_TOKEN = 4
 _SAFETY_FACTOR = 0.85  # leave headroom for prompt overhead
+_MIN_PROMPTABLE_TOKENS = 64
+_RESPONSE_TOKENS_RATIO = 0.18
+_MIN_RESPONSE_TOKENS = 256
+_MAX_RESPONSE_TOKENS = 2048
 
 
 def _build_llm(model: LLMModel, api_key: str | None) -> ChatOpenAI:
@@ -37,9 +43,67 @@ def _build_llm(model: LLMModel, api_key: str | None) -> ChatOpenAI:
     return ChatOpenAI(**kwargs)
 
 
+def _estimate_tokens(text: str) -> int:
+    if not text:
+        return 0
+    return max(1, math.ceil(len(text) / _CHARS_PER_TOKEN))
+
+
+def _truncate_to_token_budget(text: str, max_tokens: int) -> str:
+    """Approximate token-aware truncation for prompt fragments."""
+    if max_tokens <= 0 or not text:
+        return ""
+
+    max_chars = max_tokens * _CHARS_PER_TOKEN
+    if len(text) <= max_chars:
+        return text
+
+    suffix = "\n...[truncated]"
+    truncated = text[: max(0, max_chars - len(suffix))].rstrip()
+    return f"{truncated}{suffix}"
+
+
+def _scaled_token_budget(
+    max_context_tokens: int,
+    ratio: float,
+    minimum: int,
+    maximum: int,
+) -> int:
+    scaled = int(max_context_tokens * ratio)
+    return max(minimum, min(maximum, scaled))
+
+
+def _response_token_budget(max_context_tokens: int) -> int:
+    return _scaled_token_budget(
+        max_context_tokens=max_context_tokens,
+        ratio=_RESPONSE_TOKENS_RATIO,
+        minimum=_MIN_RESPONSE_TOKENS,
+        maximum=_MAX_RESPONSE_TOKENS,
+    )
+
+
+def _available_prompt_tokens(
+    max_context_tokens: int,
+    fixed_texts: Sequence[str],
+    response_tokens: int | None = None,
+) -> int:
+    """Return the token budget available for diff-like variable input."""
+    if response_tokens is None:
+        response_tokens = _response_token_budget(max_context_tokens)
+    fixed_tokens = sum(_estimate_tokens(text) for text in fixed_texts)
+    remaining_tokens = max_context_tokens - fixed_tokens - response_tokens
+    promptable_tokens = int(remaining_tokens * _SAFETY_FACTOR)
+    if promptable_tokens < _MIN_PROMPTABLE_TOKENS:
+        raise LLMServiceError(
+            "Configured prompts are too large for the model context window. "
+            "Use a larger context window or shorten the prompt text."
+        )
+    return promptable_tokens
+
+
 def _chunk_diff(diff: str, max_tokens: int) -> list[str]:
-    """Split diff into chunks that fit within max_tokens."""
-    max_chars = int(max_tokens * _CHARS_PER_TOKEN * _SAFETY_FACTOR)
+    """Split diff into chunks that fit within the supplied token budget."""
+    max_chars = max(1, int(max_tokens * _CHARS_PER_TOKEN))
     if len(diff) <= max_chars:
         return [diff]
 
@@ -47,20 +111,44 @@ def _chunk_diff(diff: str, max_tokens: int) -> list[str]:
     current_chunk: list[str] = []
     current_len = 0
 
-    for block in diff.split("\n--- "):
-        block_str = ("--- " + block) if chunks or current_chunk else block
-        if current_len + len(block_str) > max_chars and current_chunk:
-            chunks.append("\n--- ".join(current_chunk))
-            current_chunk = [block]
-            current_len = len(block_str)
+    for line in diff.splitlines(keepends=True):
+        if len(line) > max_chars:
+            if current_chunk:
+                chunks.append("".join(current_chunk).rstrip("\n"))
+                current_chunk = []
+                current_len = 0
+            start = 0
+            while start < len(line):
+                chunks.append(line[start : start + max_chars].rstrip("\n"))
+                start += max_chars
+            continue
+
+        if current_len + len(line) > max_chars and current_chunk:
+            chunks.append("".join(current_chunk).rstrip("\n"))
+            current_chunk = [line]
+            current_len = len(line)
         else:
-            current_chunk.append(block)
-            current_len += len(block_str)
+            current_chunk.append(line)
+            current_len += len(line)
 
     if current_chunk:
-        chunks.append("\n--- ".join(current_chunk))
+        chunks.append("".join(current_chunk).rstrip("\n"))
 
     return chunks
+
+
+def _chunk_diff_for_prompt(
+    diff: str,
+    max_context_tokens: int,
+    fixed_texts: Sequence[str],
+    response_tokens: int | None = None,
+) -> list[str]:
+    available_tokens = _available_prompt_tokens(
+        max_context_tokens=max_context_tokens,
+        fixed_texts=fixed_texts,
+        response_tokens=response_tokens,
+    )
+    return _chunk_diff(diff, available_tokens)
 
 
 def _extract_json(text: str) -> list[dict]:
@@ -100,6 +188,37 @@ def _normalize_comment(c: dict) -> dict:
     }
 
 
+def _deduplicate_comments(comments: list[dict]) -> list[dict]:
+    """Remove exact duplicate comments without another LLM pass."""
+    deduplicated: list[dict] = []
+    seen: set[tuple] = set()
+
+    for raw_comment in comments:
+        comment = _normalize_comment(raw_comment)
+        key = (
+            comment.get("file_path"),
+            comment.get("line_number"),
+            comment.get("line_end"),
+            comment.get("severity", "info"),
+            (comment.get("comment_body") or "").strip(),
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        deduplicated.append(comment)
+
+    return deduplicated
+
+
+def _render_review_prompt_template(prompt_content: str, metadata: dict) -> str:
+    """Render metadata while leaving the diff placeholder for chunk substitution."""
+    prompt_metadata = {**metadata, "diff": "{diff}"}
+    try:
+        return prompt_content.format(**prompt_metadata)
+    except KeyError:
+        return prompt_content
+
+
 async def run_review_chain(
     diff: str,
     metadata: dict,
@@ -122,12 +241,14 @@ async def run_review_chain(
     """).strip()
 
     # Format the review prompt with metadata
-    try:
-        human_text = review_prompt.content.format(**metadata)
-    except KeyError:
-        human_text = review_prompt.content
+    human_text = _render_review_prompt_template(review_prompt.content, metadata)
 
-    chunks = _chunk_diff(diff, model.max_context_tokens)
+    prompt_without_diff = human_text.replace("{diff}", "")
+    chunks = _chunk_diff_for_prompt(
+        diff=diff,
+        max_context_tokens=model.max_context_tokens,
+        fixed_texts=[system_text, prompt_without_diff],
+    )
     all_comments: list[dict] = []
 
     for i, chunk in enumerate(chunks):

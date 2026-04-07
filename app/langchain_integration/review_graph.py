@@ -30,14 +30,29 @@ from typing import TypedDict
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_core.output_parsers import StrOutputParser
 from langchain_openai import ChatOpenAI
-from langgraph.graph import END, START, StateGraph
 
 from app.core.exceptions import LLMServiceError
-from app.langchain_integration.chains import _build_llm, _chunk_diff, _extract_json, _normalize_comment
+from app.langchain_integration.chains import (
+    _available_prompt_tokens,
+    _build_llm,
+    _chunk_diff,
+    _deduplicate_comments,
+    _extract_json,
+    _normalize_comment,
+    _scaled_token_budget,
+    _truncate_to_token_budget,
+)
 from app.models.llm import LLMModel
 from app.models.prompt import Prompt
 
 logger = logging.getLogger(__name__)
+
+_GRAPH_RESPONSE_RATIO = 0.14
+_MIN_GRAPH_RESPONSE_TOKENS = 192
+_MAX_GRAPH_RESPONSE_TOKENS = 1536
+_PLAN_CONTEXT_RATIO = 0.10
+_MIN_PLAN_CONTEXT_TOKENS = 128
+_MAX_PLAN_CONTEXT_TOKENS = 1024
 
 
 class ReviewState(TypedDict):
@@ -89,9 +104,79 @@ async def run_review_graph(
         if system_prompt
         else "You are an expert code reviewer. Respond ONLY with valid JSON. No prose outside JSON."
     )
+    graph_response_tokens = _scaled_token_budget(
+        max_context_tokens=model.max_context_tokens,
+        ratio=_GRAPH_RESPONSE_RATIO,
+        minimum=_MIN_GRAPH_RESPONSE_TOKENS,
+        maximum=_MAX_GRAPH_RESPONSE_TOKENS,
+    )
+    plan_context_tokens = _scaled_token_budget(
+        max_context_tokens=model.max_context_tokens,
+        ratio=_PLAN_CONTEXT_RATIO,
+        minimum=_MIN_PLAN_CONTEXT_TOKENS,
+        maximum=_MAX_PLAN_CONTEXT_TOKENS,
+    )
 
-    # Chunk diff if needed
-    chunks = _chunk_diff(diff, model.max_context_tokens)
+    plan_fixed_text = """Analyze this diff and list:
+1. Which files are changed and what they do
+2. Top 3-5 areas to focus the review on (security, perf, logic, style, tests)
+3. Any obvious red flags
+
+Diff:
+
+Respond with a brief plain-text analysis (not JSON)."""
+    review_plan_placeholder = "x" * (plan_context_tokens * 4)
+    security_fixed_text = f"""Review ONLY for security issues:
+- Injection (SQL, command, XSS, path traversal)
+- Auth/authz flaws, missing checks
+- Secrets/credentials in code
+- Insecure deserialization or crypto
+- OWASP Top 10
+
+Review plan context:
+{review_plan_placeholder}
+
+Diff:
+
+Respond ONLY with a JSON array. Each item: {{"file_path": str|null, "start_line": int|null, "end_line": int|null, "severity": "info"|"warning"|"error", "comment": str}}"""
+    quality_fixed_text = f"""Review for code quality, maintainability, and correctness:
+- Bugs and logic errors
+- Performance issues (N+1 queries, unnecessary loops, missing indexes)
+- Missing error handling
+- Dead code, unused variables
+- Missing or inadequate tests
+- API design issues
+
+Review plan context:
+{review_plan_placeholder}
+
+Diff:
+
+Respond ONLY with a JSON array. Each item: {{"file_path": str|null, "start_line": int|null, "end_line": int|null, "severity": "info"|"warning"|"error", "comment": str}}"""
+
+    graph_chunk_budget = min(
+        _available_prompt_tokens(
+            max_context_tokens=model.max_context_tokens,
+            fixed_texts=[
+                "You are a senior engineer planning a code review.",
+                plan_fixed_text,
+            ],
+            response_tokens=graph_response_tokens,
+        ),
+        _available_prompt_tokens(
+            max_context_tokens=model.max_context_tokens,
+            fixed_texts=[system_text, security_fixed_text],
+            response_tokens=graph_response_tokens,
+        ),
+        _available_prompt_tokens(
+            max_context_tokens=model.max_context_tokens,
+            fixed_texts=[system_text, quality_fixed_text],
+            response_tokens=graph_response_tokens,
+        ),
+    )
+
+    # Chunk diff to the smallest graph-stage budget.
+    chunks = _chunk_diff(diff, graph_chunk_budget)
     all_comments: list[dict] = []
 
     for chunk in chunks:
@@ -106,7 +191,17 @@ async def run_review_graph(
         )
 
         try:
-            comments = await _run_graph(llm, chain, parser, state, metadata, review_prompt)
+            comments = await _run_graph(
+                llm,
+                chain,
+                parser,
+                state,
+                metadata,
+                review_prompt,
+                model.max_context_tokens,
+                plan_context_tokens,
+                graph_response_tokens,
+            )
             all_comments.extend(comments)
         except Exception as e:
             logger.warning("LangGraph review failed, falling back to single-shot: %s", e)
@@ -125,7 +220,17 @@ async def run_review_graph(
     return all_comments
 
 
-async def _run_graph(llm, chain, parser, state: ReviewState, metadata: dict, review_prompt: Prompt) -> list[dict]:
+async def _run_graph(
+    llm,
+    chain,
+    parser,
+    state: ReviewState,
+    metadata: dict,
+    review_prompt: Prompt,
+    max_context_tokens: int,
+    plan_context_tokens: int,
+    graph_response_tokens: int,
+) -> list[dict]:
     diff = state["diff"]
     system_text = state["system_prompt"]
 
@@ -144,6 +249,7 @@ Respond with a brief plain-text analysis (not JSON)."""
         SystemMessage(content="You are a senior engineer planning a code review."),
         HumanMessage(content=plan_prompt),
     ])
+    plan = _truncate_to_token_budget(plan, plan_context_tokens)
 
     # ── Node 2: Security Review ────────────────────────────────────────────────
     security_prompt = f"""Review ONLY for security issues:
@@ -212,15 +318,25 @@ Comments to consolidate:
 
 Respond ONLY with the final JSON array. Each item: {{"file_path": str|null, "start_line": int|null, "end_line": int|null, "severity": "info"|"warning"|"error", "comment": str}}"""
 
+    consolidation_system = "You are an expert editor consolidating code review comments. Respond ONLY with JSON."
+    try:
+        _available_prompt_tokens(
+            max_context_tokens=max_context_tokens,
+            fixed_texts=[consolidation_system, consolidate_prompt],
+            response_tokens=graph_response_tokens,
+        )
+    except LLMServiceError:
+        return _deduplicate_comments(all_raw)
+
     final_raw = await chain.ainvoke([
-        SystemMessage(content="You are an expert editor consolidating code review comments. Respond ONLY with JSON."),
+        SystemMessage(content=consolidation_system),
         HumanMessage(content=consolidate_prompt),
     ])
 
     try:
         final = _extract_json(final_raw)
     except LLMServiceError:
-        final = all_raw  # use un-consolidated if consolidation fails
+        final = _deduplicate_comments(all_raw)
 
     # Normalize
     normalized = []
