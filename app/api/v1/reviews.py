@@ -36,20 +36,20 @@ async def get_comments(job_id: uuid.UUID, db: DB, _: ReviewerUser):
 
 
 @router.post("/{job_id}/retry", response_model=ReviewJobRead, status_code=202)
-async def retry_review(job_id: uuid.UUID, db: DB, _: ReviewerUser):
-    return await svc.retry_job(db, job_id)
+async def retry_review(job_id: uuid.UUID, db: DB, current_user: ReviewerUser):
+    return await svc.retry_job(db, job_id, current_user)
 
 
 @router.post("/{job_id}/requeue", response_model=ReviewJobRead, status_code=202)
-async def requeue_review(job_id: uuid.UUID, db: DB, _: ReviewerUser):
-    return await svc.requeue_pending_job(db, job_id)
+async def requeue_review(job_id: uuid.UUID, db: DB, current_user: ReviewerUser):
+    return await svc.requeue_pending_job(db, job_id, current_user)
 
 
 @router.post("/{job_id}/restart", response_model=ReviewJobRead, status_code=202)
-async def restart_review(job_id: uuid.UUID, db: DB, _: ReviewerUser):
-    return await svc.restart_job(db, job_id)
+async def restart_review(job_id: uuid.UUID, db: DB, current_user: ReviewerUser):
+    return await svc.restart_job(db, job_id, current_user)
 
 
 @router.delete("/{job_id}", status_code=204)
-async def delete_review(job_id: uuid.UUID, db: DB, _: ReviewerUser):
-    await svc.delete_job(db, job_id)
+async def delete_review(job_id: uuid.UUID, db: DB, current_user: ReviewerUser):
+    await svc.delete_job(db, job_id, current_user)

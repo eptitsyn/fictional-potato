@@ -8,6 +8,7 @@ from app.core.exceptions import ForbiddenError, NotFoundError
 from app.models.prompt import Prompt
 from app.models.user import User
 from app.schemas.prompt import PromptCreate, PromptUpdate
+from app.services.event_log_service import log_event
 
 PromptType = Literal["system", "commit_review", "mr_review"]
 
@@ -35,7 +36,7 @@ async def resolve_effective_prompt(
         select(Prompt).where(
             Prompt.user_id == None,  # noqa: E711
             Prompt.prompt_type == prompt_type,
-            Prompt.is_default == True,
+            Prompt.is_default,
             Prompt.is_active == True,  # noqa: E712
         )
     )
@@ -93,6 +94,17 @@ async def create_prompt(
     db.add(prompt)
     await db.commit()
     await db.refresh(prompt)
+    await log_event(
+        db, "prompt.created", f"Prompt '{prompt.name}' created",
+        user_id=owner.id,
+        username=owner.username,
+        details={
+            "prompt_id": str(prompt.id),
+            "name": prompt.name,
+            "prompt_type": prompt.prompt_type,
+            "is_global": user_id is None,
+        },
+    )
     return prompt
 
 
@@ -104,10 +116,21 @@ async def update_prompt(
     if prompt.user_id is not None and prompt.user_id != actor.id and actor.role != "admin":
         raise ForbiddenError("Cannot update another user's prompt")
 
-    for field, value in data.model_dump(exclude_none=True).items():
+    update_data = data.model_dump(exclude_none=True)
+    for field, value in update_data.items():
         setattr(prompt, field, value)
     await db.commit()
     await db.refresh(prompt)
+    await log_event(
+        db, "prompt.updated", f"Prompt '{prompt.name}' updated",
+        user_id=actor.id,
+        username=actor.username,
+        details={
+            "prompt_id": str(prompt.id),
+            "name": prompt.name,
+            "changed_fields": list(update_data.keys()),
+        },
+    )
     return prompt
 
 
@@ -115,8 +138,16 @@ async def delete_prompt(db: AsyncSession, prompt_id: uuid.UUID, actor: User) -> 
     prompt = await get_prompt(db, prompt_id, actor)
     if prompt.user_id is None and actor.role != "admin":
         raise ForbiddenError("Only admins can delete global prompts")
+    name = prompt.name
     await db.delete(prompt)
     await db.commit()
+    await log_event(
+        db, "prompt.deleted", f"Prompt '{name}' deleted",
+        level="warning",
+        user_id=actor.id,
+        username=actor.username,
+        details={"prompt_id": str(prompt_id), "name": name},
+    )
 
 
 async def set_global_default(
@@ -134,14 +165,25 @@ async def set_global_default(
         select(Prompt).where(
             Prompt.user_id == None,  # noqa: E711
             Prompt.prompt_type == prompt.prompt_type,
-            Prompt.is_default == True,
+            Prompt.is_default,
             Prompt.id != prompt_id,
         )
     )
+    prev_default_id: str | None = None
     for p in existing.scalars().all():
+        prev_default_id = str(p.id)
         p.is_default = False
 
     prompt.is_default = True
     await db.commit()
     await db.refresh(prompt)
+    await log_event(
+        db, "prompt.set_default", f"Prompt '{prompt.name}' set as global default",
+        details={
+            "prompt_id": str(prompt.id),
+            "name": prompt.name,
+            "prompt_type": prompt.prompt_type,
+            "prev_default_id": prev_default_id,
+        },
+    )
     return prompt

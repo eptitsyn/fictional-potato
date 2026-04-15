@@ -1,0 +1,35 @@
+wing: ai_code_reviewer
+rooms:
+- name: app
+  description: Files from app/
+  keywords:
+  - app
+  - app
+- name: testing
+  description: Files from tests/
+  keywords:
+  - testing
+  - tests
+- name: ai_code_reviewer.egg_info
+  description: Files from ai_code_reviewer.egg-info/
+  keywords:
+  - ai_code_reviewer.egg_info
+  - ai_code_reviewer.egg-info
+- name: alembic
+  description: Files from alembic/
+  keywords:
+  - alembic
+  - alembic
+- name: frontend
+  description: Files from ui/
+  keywords:
+  - frontend
+  - ui
+- name: backend
+  description: Files from models/
+  keywords:
+  - backend
+  - models
+- name: general
+  description: Files that don't fit other rooms
+  keywords: []

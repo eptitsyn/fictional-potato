@@ -50,5 +50,9 @@ target-version = "py311"
 select = ["E", "F", "W", "I"]
 ignore = ["E501"]  # line length handled by formatter
 
+[flake8]
+max-line-length = 100
+extend-ignore = "E501"
+
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

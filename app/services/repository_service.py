@@ -10,6 +10,7 @@ from app.models.git_server import GitServer
 from app.models.llm import LLMModel
 from app.models.repository import Repository
 from app.schemas.repository import RepositoryCreate, RepositoryUpdate
+from app.services.event_log_service import log_event
 
 
 async def list_repositories(db: AsyncSession) -> list[Repository]:
@@ -82,7 +83,17 @@ async def create_repository(db: AsyncSession, data: RepositoryCreate) -> Reposit
     db.add(repo)
     await db.commit()
     await db.refresh(repo)
-    return await get_repository(db, repo.id)
+    result = await get_repository(db, repo.id)
+    await log_event(
+        db, "repository.created", f"Repository '{result.name}' created",
+        details={
+            "repo_id": str(result.id),
+            "name": result.name,
+            "git_server_id": str(data.git_server_id),
+            "gitlab_project_id": data.gitlab_project_id,
+        },
+    )
+    return result
 
 
 async def update_repository(
@@ -91,7 +102,8 @@ async def update_repository(
     repo = await get_repository(db, repo_id)
     update_data = data.model_dump(exclude_none=True)
 
-    if "webhook_secret" in update_data:
+    webhook_rotated = "webhook_secret" in update_data
+    if webhook_rotated:
         repo.webhook_secret_encrypted = encrypt(update_data.pop("webhook_secret"))
 
     next_git_server_id = update_data.get("git_server_id", repo.git_server_id)
@@ -119,13 +131,40 @@ async def update_repository(
         setattr(repo, field, value)
     await db.commit()
     await db.refresh(repo)
-    return await get_repository(db, repo.id)
+    result = await get_repository(db, repo.id)
+
+    if webhook_rotated:
+        await log_event(
+            db, "repository.webhook_secret_rotated",
+            f"Webhook secret rotated for '{result.name}'",
+            details={"repo_id": str(result.id), "name": result.name},
+        )
+    else:
+        changed = list(update_data.keys())
+        event = (
+            "repository.deactivated"
+            if "is_active" in changed and not repo.is_active
+            else "repository.updated"
+        )
+        level = "warning" if event == "repository.deactivated" else "info"
+        await log_event(
+            db, event, f"Repository '{result.name}' {event.split('.')[1]}",
+            level=level,
+            details={"repo_id": str(result.id), "name": result.name, "changed_fields": changed},
+        )
+    return result
 
 
 async def delete_repository(db: AsyncSession, repo_id: uuid.UUID) -> None:
     repo = await get_repository(db, repo_id)
+    name = repo.name
     await db.delete(repo)
     await db.commit()
+    await log_event(
+        db, "repository.deleted", f"Repository '{name}' deleted",
+        level="warning",
+        details={"repo_id": str(repo_id), "name": name},
+    )
 
 
 def get_decrypted_webhook_secret(repo: Repository) -> str:

@@ -11,8 +11,11 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from app.api.v1.router import api_router
 from app.config import settings
 from app.core.database import AsyncSessionLocal
+from app.core.logging_config import configure_logging
 from app.models.request_log import RequestLog
 from app.services.auth_service import bootstrap_admin
+
+configure_logging()
 
 logger = logging.getLogger(__name__)
 
@@ -56,13 +59,31 @@ class RequestLoggingMiddleware(BaseHTTPMiddleware):
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Bootstrap first admin on cold start
+    from app.services.event_log_service import log_event
+
     async with AsyncSessionLocal() as db:
-        await bootstrap_admin(
+        admin_created = await bootstrap_admin(
             db,
             email=settings.FIRST_ADMIN_EMAIL,
             username=settings.FIRST_ADMIN_USERNAME,
             password=settings.FIRST_ADMIN_PASSWORD,
+        )
+        if admin_created:
+            await log_event(
+                db, "system.first_admin_created",
+                f"First admin '{settings.FIRST_ADMIN_USERNAME}' bootstrapped",
+                level="warning",
+                details={
+                    "username": settings.FIRST_ADMIN_USERNAME,
+                    "email": settings.FIRST_ADMIN_EMAIL,
+                },
+            )
+        await log_event(
+            db, "system.startup", "Application started",
+            details={
+                "version": "1.0.0",
+                "first_admin_created": admin_created,
+            },
         )
     yield
 

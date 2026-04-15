@@ -136,6 +136,27 @@ async def _log_llm_exchange(
     )
 
 
+async def _log_agent_step(
+    *,
+    job_id: str | None,
+    stage: str,
+    event_type: str,
+    message: str,
+    level: str = "info",
+    details: dict | None = None,
+) -> None:
+    """Log a single agent pipeline step (tool call, observation, reflect, etc.)."""
+    from app.services.event_log_service import log_event
+
+    await log_event(
+        None,
+        event_type,
+        message,
+        level=level,
+        details={"job_id": job_id, "stage": stage, **(details or {})},
+    )
+
+
 # ── ReAct agent loop ─────────────────────────────────────────────────────────
 
 def _reflect_prompt(step: int, max_steps: int) -> str:
@@ -259,9 +280,17 @@ async def _run_agent(
         )
 
         if not tool_calls:
-            # Agent decided it has enough information
-            logger.debug(
-                "Agent finished after %d iteration(s)", iteration + 1
+            # Agent decided it has enough information — no tools, final answer
+            logger.debug("Agent finished after %d iteration(s)", iteration + 1)
+            await _log_agent_step(
+                job_id=job_id, stage=stage,
+                event_type="agent.answer",
+                message=f"{stage}: agent answered after {iteration + 1} iteration(s)",
+                details={
+                    "iteration": iteration + 1,
+                    "answer_chars": len(response.content or ""),
+                    "answer": (response.content or "")[:_LOG_RESPONSE_LIMIT],
+                },
             )
             return response.content or ""
 
@@ -274,32 +303,69 @@ async def _run_agent(
 
         # ── OBSERVE: execute tools, append results to memory ─────────────────
         for tc in tool_calls:
+            await _log_agent_step(
+                job_id=job_id, stage=stage,
+                event_type="agent.tool_call",
+                message=f"{stage}: calling tool '{tc['name']}'",
+                details={
+                    "iteration": iteration + 1,
+                    "tool": tc["name"],
+                    "args": tc.get("args", {}),
+                },
+            )
+
             tool_fn = tool_map.get(tc["name"])
             if tool_fn is None:
                 result = f"[Инструмент '{tc['name']}' не найден]"
+                await _log_agent_step(
+                    job_id=job_id, stage=stage,
+                    event_type="agent.tool_result",
+                    message=f"{stage}: tool '{tc['name']}' not found",
+                    level="warning",
+                    details={"iteration": iteration + 1, "tool": tc["name"], "result": result},
+                )
             else:
                 try:
                     result = await tool_fn.ainvoke(tc["args"])
+                    await _log_agent_step(
+                        job_id=job_id, stage=stage,
+                        event_type="agent.tool_result",
+                        message=f"{stage}: tool '{tc['name']}' returned {len(str(result))} chars",
+                        details={
+                            "iteration": iteration + 1,
+                            "tool": tc["name"],
+                            "result_chars": len(str(result)),
+                            "result": str(result)[:_LOG_RESPONSE_LIMIT],
+                        },
+                    )
                 except Exception as exc:
-                    logger.warning(
-                        "Tool %s raised: %s", tc["name"], exc
+                    logger.warning("Tool %s raised: %s", tc["name"], exc)
+                    result = f"[Ошибка инструмента '{tc['name']}': {exc}]"
+                    await _log_agent_step(
+                        job_id=job_id, stage=stage,
+                        event_type="agent.tool_result",
+                        message=f"{stage}: tool '{tc['name']}' raised an error",
+                        level="warning",
+                        details={"iteration": iteration + 1, "tool": tc["name"], "error": str(exc)},
                     )
-                    result = (
-                        f"[Ошибка инструмента '{tc['name']}': {exc}]"
-                    )
+
             messages.append(
-                ToolMessage(
-                    content=str(result),
-                    tool_call_id=tc["id"],
-                )
+                ToolMessage(content=str(result), tool_call_id=tc["id"])
             )
 
         # ── REFLECT: ask agent to assess completeness ────────────────────────
-        messages.append(
-            HumanMessage(
-                content=_reflect_prompt(iteration + 1, max_iterations)
-            )
+        reflect_text = _reflect_prompt(iteration + 1, max_iterations)
+        await _log_agent_step(
+            job_id=job_id, stage=stage,
+            event_type="agent.reflect",
+            message=f"{stage}: reflect step after iteration {iteration + 1}",
+            details={
+                "iteration": iteration + 1,
+                "reflect_prompt": reflect_text,
+                "tools_called": [tc["name"] for tc in tool_calls],
+            },
         )
+        messages.append(HumanMessage(content=reflect_text))
 
     # ── Max iterations reached — force a final answer ────────────────────────
     logger.warning(

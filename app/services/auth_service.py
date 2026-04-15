@@ -53,10 +53,11 @@ async def get_user_from_token(db: AsyncSession, token: str) -> User:
     return user
 
 
-async def bootstrap_admin(db: AsyncSession, email: str, username: str, password: str) -> None:
+async def bootstrap_admin(db: AsyncSession, email: str, username: str, password: str) -> bool:
+    """Create first admin on cold start. Returns True if admin was created."""
     result = await db.execute(select(User))
     if result.first() is not None:
-        return  # users already exist
+        return False  # users already exist
 
     admin = User(
         email=email,
@@ -67,3 +68,4 @@ async def bootstrap_admin(db: AsyncSession, email: str, username: str, password:
     )
     db.add(admin)
     await db.commit()
+    return True

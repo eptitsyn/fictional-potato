@@ -16,8 +16,8 @@ async def list_users(db: DB, _: AdminUser):
 
 
 @router.post("", response_model=UserRead, status_code=201)
-async def create_user(data: UserCreate, db: DB, _: AdminUser):
-    return await user_service.create_user(db, data)
+async def create_user(data: UserCreate, db: DB, current_user: AdminUser):
+    return await user_service.create_user(db, data, actor=current_user)
 
 
 @router.get("/{user_id}", response_model=UserRead)
@@ -28,8 +28,8 @@ async def get_user(user_id: uuid.UUID, db: DB, current_user: CurrentUser):
 
 
 @router.put("/{user_id}", response_model=UserRead)
-async def update_user(user_id: uuid.UUID, data: UserUpdate, db: DB, _: AdminUser):
-    return await user_service.update_user(db, user_id, data)
+async def update_user(user_id: uuid.UUID, data: UserUpdate, db: DB, current_user: AdminUser):
+    return await user_service.update_user(db, user_id, data, actor=current_user)
 
 
 @router.delete("/{user_id}", status_code=204)

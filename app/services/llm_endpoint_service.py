@@ -12,6 +12,7 @@ from app.core.security import decrypt, encrypt
 from app.models.llm import LLMEndpoint, LLMModel
 from app.models.user import User
 from app.schemas.llm import LLMEndpointCreate, LLMEndpointUpdate, LLMModelCreate, LLMModelUpdate
+from app.services.event_log_service import log_event
 
 
 def _build_endpoint_headers(endpoint: LLMEndpoint) -> dict[str, str]:
@@ -156,6 +157,12 @@ async def create_endpoint(
     db.add(ep)
     await db.commit()
     await db.refresh(ep)
+    await log_event(
+        db, "llm_endpoint.created", f"LLM endpoint '{ep.name}' created",
+        user_id=creator.id,
+        username=creator.username,
+        details={"endpoint_id": str(ep.id), "name": ep.name, "base_url": ep.base_url},
+    )
     return ep
 
 
@@ -170,26 +177,50 @@ async def update_endpoint(
         setattr(ep, field, value)
     await db.commit()
     await db.refresh(ep)
+    await log_event(
+        db, "llm_endpoint.updated", f"LLM endpoint '{ep.name}' updated",
+        details={"endpoint_id": str(ep.id), "changed_fields": list(update_data.keys())},
+    )
     return ep
 
 
 async def delete_endpoint(db: AsyncSession, endpoint_id: uuid.UUID) -> None:
     ep = await get_endpoint(db, endpoint_id)
+    name = ep.name
     await db.delete(ep)
     await db.commit()
+    await log_event(
+        db, "llm_endpoint.deleted", f"LLM endpoint '{name}' deleted",
+        level="warning",
+        details={"endpoint_id": str(endpoint_id), "name": name},
+    )
 
 
 async def test_endpoint(db: AsyncSession, endpoint_id: uuid.UUID) -> dict:
+    import time
     ep = await get_endpoint(db, endpoint_id)
 
+    t0 = time.monotonic()
     try:
         payload = await _fetch_endpoint_models_payload(ep)
-        return {
+        latency_ms = int((time.monotonic() - t0) * 1000)
+        result = {
             "status": "ok",
             "http_status": status.HTTP_200_OK,
             "models_found": len(_extract_available_model_names(payload)),
         }
+        await log_event(
+            db, "llm_endpoint.tested", f"LLM endpoint '{ep.name}' test OK",
+            details={"endpoint_id": str(ep.id), "success": True, "latency_ms": latency_ms},
+        )
+        return result
     except Exception as e:
+        latency_ms = int((time.monotonic() - t0) * 1000)
+        await log_event(
+            db, "llm_endpoint.tested", f"LLM endpoint '{ep.name}' test failed",
+            level="warning",
+            details={"endpoint_id": str(ep.id), "success": False, "latency_ms": latency_ms},
+        )
         return {"status": "error", "detail": str(e)}
 
 
@@ -317,6 +348,14 @@ async def create_model(
     db.add(model)
     await db.commit()
     await db.refresh(model)
+    await log_event(
+        db, "llm_model.created", f"LLM model '{model.model_name}' created",
+        details={
+            "model_id": str(model.id),
+            "model_name": model.model_name,
+            "endpoint_id": str(endpoint_id),
+        },
+    )
     return model
 
 
@@ -339,6 +378,7 @@ async def update_model(
                 f"Model '{update_data['model_name']}' already exists for this endpoint"
             )
 
+    prev_default_id: str | None = None
     if update_data.get("is_global_default"):
         result = await db.execute(
             select(LLMModel).where(
@@ -347,16 +387,42 @@ async def update_model(
             )
         )
         for m in result.scalars().all():
+            prev_default_id = str(m.id)
             m.is_global_default = False
 
     for field, value in update_data.items():
         setattr(model, field, value)
     await db.commit()
     await db.refresh(model)
+
+    if update_data.get("is_global_default"):
+        await log_event(
+            db, "llm_model.set_global_default",
+            f"LLM model '{model.model_name}' set as global default",
+            details={
+                "model_id": str(model.id),
+                "model_name": model.model_name,
+                "prev_default_id": prev_default_id,
+            },
+        )
+    else:
+        await log_event(
+            db, "llm_model.updated", f"LLM model '{model.model_name}' updated",
+            details={
+                "model_id": str(model.id),
+                "changed_fields": list(update_data.keys()),
+            },
+        )
     return model
 
 
 async def delete_model(db: AsyncSession, model_id: uuid.UUID) -> None:
     model = await get_model(db, model_id)
+    name = model.model_name
     await db.delete(model)
     await db.commit()
+    await log_event(
+        db, "llm_model.deleted", f"LLM model '{name}' deleted",
+        level="warning",
+        details={"model_id": str(model_id), "model_name": name},
+    )

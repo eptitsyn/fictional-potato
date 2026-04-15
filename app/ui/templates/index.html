@@ -342,6 +342,10 @@
               <option value="llm.fallback">llm.fallback</option>
               <option value="llm.review_started">llm.review_started</option>
               <option value="llm.review_completed">llm.review_completed</option>
+              <option value="agent.tool_call">agent.tool_call</option>
+              <option value="agent.tool_result">agent.tool_result</option>
+              <option value="agent.reflect">agent.reflect</option>
+              <option value="agent.answer">agent.answer</option>
               <option value="gitlab.webhook_received">gitlab.webhook_received</option>
               <option value="gitlab.webhook_invalid_token">gitlab.webhook_invalid_token</option>
               <option value="gitlab.comment_posted">gitlab.comment_posted</option>
@@ -1717,6 +1721,7 @@ const _logTypeColor = {
   'auth.logout': 'var(--text-muted)',
   'review.started': 'var(--accent)', 'review.completed': 'var(--success)', 'review.failed': 'var(--danger)',
   'llm.call': '#a78bfa', 'llm.response': '#c4b5fd', 'llm.exchange': '#ddd6fe', 'llm.fallback': 'var(--warning)',
+  'agent.tool_call': '#f59e0b', 'agent.tool_result': '#fcd34d', 'agent.reflect': '#6ee7b7', 'agent.answer': 'var(--success)',
   'llm.review_started': '#a78bfa', 'llm.review_completed': '#c4b5fd',
   'gitlab.webhook_received': 'var(--accent)', 'gitlab.webhook_invalid_token': 'var(--danger)',
   'gitlab.comment_posted': 'var(--success)', 'gitlab.comment_failed': 'var(--warning)',

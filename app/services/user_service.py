@@ -7,6 +7,7 @@ from app.core.exceptions import ConflictError, ForbiddenError, NotFoundError
 from app.core.security import hash_password, verify_password
 from app.models.user import User
 from app.schemas.user import UserCreate, UserPasswordChange, UserUpdate
+from app.services.event_log_service import log_event
 
 
 async def list_users(db: AsyncSession) -> list[User]:
@@ -22,7 +23,7 @@ async def get_user(db: AsyncSession, user_id: uuid.UUID) -> User:
     return user
 
 
-async def create_user(db: AsyncSession, data: UserCreate) -> User:
+async def create_user(db: AsyncSession, data: UserCreate, actor: User | None = None) -> User:
     existing = await db.execute(
         select(User).where((User.email == data.email) | (User.username == data.username))
     )
@@ -38,15 +39,39 @@ async def create_user(db: AsyncSession, data: UserCreate) -> User:
     db.add(user)
     await db.commit()
     await db.refresh(user)
+    await log_event(
+        db, "user.created", f"User '{user.username}' created",
+        user_id=actor.id if actor else None,
+        username=actor.username if actor else None,
+        details={"new_user_id": str(user.id), "new_username": user.username, "role": user.role},
+    )
     return user
 
 
-async def update_user(db: AsyncSession, user_id: uuid.UUID, data: UserUpdate) -> User:
+async def update_user(db: AsyncSession, user_id: uuid.UUID, data: UserUpdate, actor: User | None = None) -> User:
     user = await get_user(db, user_id)
-    for field, value in data.model_dump(exclude_none=True).items():
+    old_role = user.role
+    update_data = data.model_dump(exclude_none=True)
+    role_changed = "role" in update_data and update_data["role"] != old_role
+    for field, value in update_data.items():
         setattr(user, field, value)
     await db.commit()
     await db.refresh(user)
+    if role_changed:
+        await log_event(
+            db, "user.role_changed", f"Role changed for '{user.username}'",
+            level="warning",
+            user_id=actor.id if actor else None,
+            username=actor.username if actor else None,
+            details={"target_user_id": str(user.id), "old_role": old_role, "new_role": user.role},
+        )
+    else:
+        await log_event(
+            db, "user.updated", f"User '{user.username}' updated",
+            user_id=actor.id if actor else None,
+            username=actor.username if actor else None,
+            details={"target_user_id": str(user.id), "changed_fields": list(update_data.keys())},
+        )
     return user
 
 
@@ -65,6 +90,13 @@ async def delete_user(db: AsyncSession, user_id: uuid.UUID, current_user: User) 
 
     user.is_active = False
     await db.commit()
+    await log_event(
+        db, "user.deactivated", f"User '{user.username}' deactivated",
+        level="warning",
+        user_id=current_user.id,
+        username=current_user.username,
+        details={"target_user_id": str(user.id), "target_username": user.username},
+    )
 
 
 async def change_password(
@@ -85,3 +117,9 @@ async def change_password(
 
     user.hashed_password = hash_password(data.new_password)
     await db.commit()
+    await log_event(
+        db, "auth.password_changed", f"Password changed for '{user.username}'",
+        user_id=actor.id,
+        username=actor.username,
+        details={"target_user_id": str(user.id), "by_admin": is_admin_override},
+    )

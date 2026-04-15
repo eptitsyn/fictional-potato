@@ -9,6 +9,7 @@ from app.core.exceptions import ConflictError, NotFoundError
 from app.core.security import decrypt, encrypt
 from app.models.git_server import GitServer
 from app.schemas.git_server import GitServerCreate, GitServerUpdate
+from app.services.event_log_service import log_event
 from app.services.gitlab_service import GitLabClient
 
 
@@ -43,6 +44,10 @@ async def create_git_server(db: AsyncSession, data: GitServerCreate) -> GitServe
     db.add(server)
     await db.commit()
     await db.refresh(server)
+    await log_event(
+        db, "git_server.created", f"Git server '{server.name}' created",
+        details={"server_id": str(server.id), "name": server.name, "base_url": server.base_url},
+    )
     return server
 
 
@@ -58,7 +63,8 @@ async def update_git_server(
         if existing.first():
             raise ConflictError(f"Git server named '{new_name}' already exists")
 
-    if "access_token" in update_data:
+    token_rotated = "access_token" in update_data
+    if token_rotated:
         server.access_token_encrypted = encrypt(update_data.pop("access_token"))
 
     for field, value in update_data.items():
@@ -66,6 +72,20 @@ async def update_git_server(
 
     await db.commit()
     await db.refresh(server)
+
+    if token_rotated:
+        await log_event(
+            db, "git_server.token_rotated", f"Access token rotated for '{server.name}'",
+            details={"server_id": str(server.id), "name": server.name},
+        )
+    else:
+        await log_event(
+            db, "git_server.updated", f"Git server '{server.name}' updated",
+            details={
+                "server_id": str(server.id),
+                "changed_fields": list(update_data.keys()),
+            },
+        )
     return server
 
 
@@ -74,8 +94,14 @@ async def delete_git_server(db: AsyncSession, server_id: uuid.UUID) -> None:
     if server.repositories:
         raise ConflictError("Delete or reassign repositories before deleting this git server")
 
+    name = server.name
     await db.delete(server)
     await db.commit()
+    await log_event(
+        db, "git_server.deleted", f"Git server '{name}' deleted",
+        level="warning",
+        details={"server_id": str(server_id), "name": name},
+    )
 
 
 async def list_projects_for_git_server(

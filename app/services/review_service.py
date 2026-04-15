@@ -11,6 +11,7 @@ from app.models.repository import Repository
 from app.models.review import ReviewJob
 from app.models.user import User
 from app.schemas.review import ReviewTriggerRequest
+from app.services.event_log_service import log_event
 from app.services.git_server_service import get_decrypted_access_token
 from app.services.gitlab_service import GitLabClient
 from app.workers.tasks import run_review_job
@@ -51,31 +52,50 @@ async def trigger_review(
     db.add(job)
     await db.commit()
     await db.refresh(job)
-
+    await log_event(
+        db, "review.triggered_manual",
+        f"Review triggered manually for repo {data.repository_id}",
+        user_id=actor.id,
+        username=actor.username,
+        details={
+            "job_id": str(job.id),
+            "repo_id": str(data.repository_id),
+            "trigger_type": data.trigger_type,
+            "commit_sha": data.commit_sha,
+            "mr_iid": data.mr_iid,
+        },
+    )
     return await _enqueue_job(db, job)
 
 
-async def retry_job(db: AsyncSession, job_id: uuid.UUID) -> ReviewJob:
+async def retry_job(db: AsyncSession, job_id: uuid.UUID, actor: User | None = None) -> ReviewJob:
     job = await get_job(db, job_id)
     if job.status not in ("failed",):
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail=f"Cannot retry a job with status '{job.status}'",
         )
+    old_status = job.status
     job.status = "pending"
     job.error_message = None
     job.started_at = None
     job.completed_at = None
     await db.commit()
-
+    await log_event(
+        db, "review.retried", f"Review job {job_id} retried",
+        user_id=actor.id if actor else None,
+        username=actor.username if actor else None,
+        details={"job_id": str(job_id), "old_status": old_status},
+    )
     return await _enqueue_job(db, job)
 
 
-async def restart_job(db: AsyncSession, job_id: uuid.UUID) -> ReviewJob:
+async def restart_job(db: AsyncSession, job_id: uuid.UUID, actor: User | None = None) -> ReviewJob:
     job = await _get_job_for_mutation(db, job_id)
     _ensure_job_is_stopped(job, action="restart")
     await _delete_gitlab_comments_for_job(job)
 
+    deleted_count = len(job.comments)
     for comment in list(job.comments):
         await db.delete(comment)
 
@@ -87,16 +107,29 @@ async def restart_job(db: AsyncSession, job_id: uuid.UUID) -> ReviewJob:
     job.prompt_id = None
     await db.commit()
     await db.refresh(job)
-
+    await log_event(
+        db, "review.restarted", f"Review job {job_id} restarted",
+        user_id=actor.id if actor else None,
+        username=actor.username if actor else None,
+        details={"job_id": str(job_id), "deleted_comments_count": deleted_count},
+    )
     return await _enqueue_job(db, job)
 
 
-async def delete_job(db: AsyncSession, job_id: uuid.UUID) -> None:
+async def delete_job(db: AsyncSession, job_id: uuid.UUID, actor: User | None = None) -> None:
     job = await _get_job_for_mutation(db, job_id)
     _ensure_job_is_stopped(job, action="delete")
     await _delete_gitlab_comments_for_job(job)
+    status_at_deletion = job.status
     await db.delete(job)
     await db.commit()
+    await log_event(
+        db, "review.deleted", f"Review job {job_id} deleted",
+        level="warning",
+        user_id=actor.id if actor else None,
+        username=actor.username if actor else None,
+        details={"job_id": str(job_id), "status_at_deletion": status_at_deletion},
+    )
 
 
 async def create_webhook_job(
@@ -121,7 +154,9 @@ async def create_webhook_job(
     return await _enqueue_job(db, job)
 
 
-async def requeue_pending_job(db: AsyncSession, job_id: uuid.UUID) -> ReviewJob:
+async def requeue_pending_job(
+    db: AsyncSession, job_id: uuid.UUID, actor: User | None = None
+) -> ReviewJob:
     job = await get_job(db, job_id)
     if job.status != "pending":
         raise HTTPException(
@@ -144,6 +179,12 @@ async def requeue_pending_job(db: AsyncSession, job_id: uuid.UUID) -> ReviewJob:
     job.completed_at = None
     await db.commit()
     await db.refresh(job)
+    await log_event(
+        db, "review.requeued", f"Review job {job_id} requeued",
+        user_id=actor.id if actor else None,
+        username=actor.username if actor else None,
+        details={"job_id": str(job_id)},
+    )
     return await _enqueue_job(db, job)
 
 
